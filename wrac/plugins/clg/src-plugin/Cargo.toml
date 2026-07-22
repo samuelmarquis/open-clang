@@ -1,0 +1,68 @@
+[package]
+name = "clg_plugin_wrac"
+version = "0.1.0"
+edition = "2024"
+description = "open-clang - physical drum/impact synthesizer"
+license = "MIT"
+repository = "https://github.com/samuelmarquis/open-clang"
+publish = false
+build = "build.rs"
+
+# WRAC metadata is the single source of truth for host-visible descriptors.
+# IDENTITY IS ABI: never change plugin_id, vst3_component_id, FourCC codes,
+# or bundle_identifier after release (docs/design/02-shell-notes.md records
+# them as the canonical table).
+[package.metadata.wrac]
+company_name = "open-clang"
+auv2_manufacturer_code = "Oclg"
+# Inert (no "aax" in supported_formats); schema requires the field.
+aax_manufacturer_id = "Oclg"
+bundle_name = "open-clang"
+bundle_identifier = "org.open-clang.clg"
+homepage_url = "https://github.com/samuelmarquis/open-clang"
+manual_url = "https://github.com/samuelmarquis/open-clang"
+support_url = "https://github.com/samuelmarquis/open-clang"
+description = "Physical drum/impact synthesizer (modal core + measured grit mechanisms)"
+copyright = "Copyright 2026 open-clang contributors"
+supported_formats = ["clap", "vst3", "au"]
+
+[[package.metadata.wrac.plugins]]
+plugin_id = "org.open-clang.clg"
+plugin_name = "open-clang"
+clap_features = ["instrument", "drum", "stereo"]
+vst3_subcategories = "Instrument|Drum"
+# Generated once (uuidgen, 2026-07-22). build.rs applies the Steinberg TUID
+# byte-swap; this is the stable pre-swap form.
+vst3_component_id = "aa746857-0729-49ef-92f6-097512510960"
+standalone_name = "open-clang Standalone"
+# "aumu": AUv2 music device — an instrument that RECEIVES MIDI and generates audio.
+auv2_type = "aumu"
+auv2_subtype = "Clg1"
+aax_categories = ["software-generator"]
+aax_product_id = "Clg1"
+
+[[package.metadata.wrac.plugins.aax_stem_configs]]
+# Inert while "aax" is not in supported_formats; schema requires the table.
+name = "Stereo"
+input = "stereo"
+output = "stereo"
+plugin_id = "ClgS"
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+atomic_float = "1.1.0"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+wrac_clap_adapter = { workspace = true }
+wrac_log = { workspace = true }
+clg-engine = { path = "../../../../rt/engine" }
+
+[lints.rust]
+unreachable_pub = "deny"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

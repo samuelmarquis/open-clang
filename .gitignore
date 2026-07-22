@@ -1,0 +1,34 @@
+# renders, packs, analysis output
+out/
+*.zip
+*.wav
+*.mid
+
+# python
+__pycache__/
+.venv/
+
+# rust (arrives at M3)
+target/
+
+# clap-wrapper SDK checkouts (re-fetch: git clone into wrac/clap_wrapper_builder/
+# per wrac/.gitmodules — clap, vst3sdk [--recursive], AudioUnitSDK)
+wrac/clap_wrapper_builder/clap/
+wrac/clap_wrapper_builder/vst3sdk/
+wrac/clap_wrapper_builder/AudioUnitSDK/
+wrac/target/
+
+# nix
+result*
+
+# DAW litter
+*Project/
+*.als
+*.asd
+
+# macOS
+.DS_Store
+Icon?
+
+# the listening log stays local — the public doesn't need the play-by-play
+LISTENING-LOG.md

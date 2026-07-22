@@ -1,0 +1,12 @@
+[package]
+name = "clg"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clg"
+path = "src/main.rs"
+
+[dependencies]
+clg-engine = { path = "../engine" }
+hound = "3.5"
