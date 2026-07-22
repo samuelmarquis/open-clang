@@ -82,7 +82,6 @@ pub struct EngineParams {
     // canonical mono voice, bit-identical in both channels.
     /// 0..1 — per-mode L/R phase divergence (zero below 4·f0: the sub
     /// stays mono by construction; ramps to full over ~3 octaves above).
-    pub width: f32,
     /// 0..1 — per-mode L/R micro-detune (dual rotor, ±up to 8 cents at
     /// full, golden-ratio salted, same ramp as width).
     pub decohere: f32,
@@ -151,7 +150,6 @@ impl Default for EngineParams {
             dust_level: 0.0,
             dust_thr_db: -40.0,
             dust_follow: 1.0,
-            width: 0.0,
             decohere: 0.0,
             stereo_floor: 0.3,
             rattle_level: 0.5,
@@ -524,7 +522,7 @@ impl Engine {
             // width acts via the ramp; SUB ROTATE acts via the INVERSE
             // spectral weight (the low region), up to 90° quadrature — the
             // vast-sub knob
-            let theta = core::f32::consts::PI * p.width.clamp(0.0, 1.0) * ramp
+            let theta = 0.0
                 + core::f32::consts::FRAC_PI_2 * p.sub_rotate.clamp(0.0, 1.0) * (1.0 - raw);
             m.ct = theta.cos();
             m.st = theta.sin();
@@ -718,7 +716,7 @@ impl Engine {
         let p = self.p;
         let dt = 1.0 / self.sr;
         let mut peak = 0.0f32;
-        let stereo = p.width > 0.0
+        let stereo = false
             || p.decohere > 0.0
             || p.mode_spread > 0.0
             || p.damp_asym > 0.0

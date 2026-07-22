@@ -34,19 +34,18 @@ pub(crate) const PARAM_POSITION_ID: u32 = 18;
 pub(crate) const PARAM_LISTEN_ID: u32 = 19;
 pub(crate) const PARAM_GAIN_ID: u32 = 20;
 pub(crate) const PARAM_BYPASS_ID: u32 = 21;
-pub(crate) const PARAM_WIDTH_ID: u32 = 22;
-pub(crate) const PARAM_DECOHERE_ID: u32 = 23;
-pub(crate) const PARAM_SFLOOR_ID: u32 = 24;
-pub(crate) const PARAM_SIZE_ID: u32 = 25;
-pub(crate) const PARAM_VELCURVE_ID: u32 = 26;
-pub(crate) const PARAM_RATTLE_LEVEL_ID: u32 = 27;
-pub(crate) const PARAM_MODE_SPREAD_ID: u32 = 28;
-pub(crate) const PARAM_DAMP_ASYM_ID: u32 = 29;
-pub(crate) const PARAM_SUB_ROTATE_ID: u32 = 30;
+pub(crate) const PARAM_DECOHERE_ID: u32 = 22;
+pub(crate) const PARAM_SFLOOR_ID: u32 = 23;
+pub(crate) const PARAM_SIZE_ID: u32 = 24;
+pub(crate) const PARAM_VELCURVE_ID: u32 = 25;
+pub(crate) const PARAM_RATTLE_LEVEL_ID: u32 = 26;
+pub(crate) const PARAM_MODE_SPREAD_ID: u32 = 27;
+pub(crate) const PARAM_DAMP_ASYM_ID: u32 = 28;
+pub(crate) const PARAM_SUB_ROTATE_ID: u32 = 29;
 // M7 — the exciter family (additive ABI, 2026-07-22)
-pub(crate) const PARAM_EXCITER_ID: u32 = 31;
-pub(crate) const PARAM_EX_COLOR_ID: u32 = 32;
-pub(crate) const PARAM_EX_TIME_ID: u32 = 33;
+pub(crate) const PARAM_EXCITER_ID: u32 = 30;
+pub(crate) const PARAM_EX_COLOR_ID: u32 = 31;
+pub(crate) const PARAM_EX_TIME_ID: u32 = 32;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -199,11 +198,9 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_LISTEN_ID, "Listen Position", 0.0, 1.0, 0.31, Format::Percent),
     continuous(PARAM_GAIN_ID, "Output", -24.0, 12.0, 0.0, Format::Db),
     bypass(PARAM_BYPASS_ID),
-    // STEREO v1 (additive ABI, 2026-07-22). Width KILLED by verdict
-    // 2026-07-22 ("kill width ... all these other controls are far more
-    // rewarding") — slot 22 retained for ABI, param inert & renamed; the
-    // phase-divergence math lives on inside Sub Rotate. PATHS-NOT-TAKEN 004.
-    continuous(PARAM_WIDTH_ID, "(deprecated)", 0.0, 1.0, 0.0, Format::Percent),
+    // STEREO v1 (2026-07-22). Width NUKED outright per the pre-1.0 policy
+    // (no saved presets, breaking changes allowed until 1.0) — ids below
+    // renumbered dense. PATHS-NOT-TAKEN 004.
     continuous(PARAM_DECOHERE_ID, "Decohere", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_SFLOOR_ID, "Stereo Floor", 0.0, 1.0, 0.3, Format::Percent),
     // M6 (additive ABI, 2026-07-22): the Size macro (Batch 004c law) +

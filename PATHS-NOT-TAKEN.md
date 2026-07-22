@@ -70,10 +70,11 @@ it on every material.
 **What hides there:** nothing unique — the identical phase-tap math
 survives inside **Sub Rotate** (inverse ramp, aimed at the sub),
 which is the part of the mechanism that earned its keep.
-**Re-entry notes:** param slot 22 retained (deprecated-inert, renamed
-"(deprecated)") for ABI hygiene; if a future control wants the slot,
-that's a release-boundary decision. DSP re-entry is trivial (unforce
-the zero in state.rs) if taste reverses again.
+**Re-entry notes:** param NUKED outright (2026-07-22, second pass) per
+the pre-1.0 policy — "there are no saved-presets, we needn't worry
+about ABI incompatibility, we can make breaking changes until release
+1.0." Ids renumbered dense (23-33 → 22-32). The phase-tap math still
+lives in Sub Rotate; re-entry means re-adding a param, nothing more.
 
 ## 005 — Post-drive / saturation / deliberate aliasing (the Microtonic pole)
 

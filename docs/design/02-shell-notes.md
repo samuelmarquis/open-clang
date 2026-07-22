@@ -273,3 +273,13 @@ events 299/1136/1128/6 across 0–100/100–300/300–600/600–1000 ms — the
 crumple follows the body's energy and dies. Listening set:
 out/exciters-v1/ (17 files: 4 exciters × 3 bodies + buckling ex-time
 sweep + burst color pair).
+
+
+## ABI policy (standing, Sam 2026-07-22)
+
+Pre-1.0: **no ABI preservation.** No saved presets exist; breaking
+changes (param removal, renumbering, identity-adjacent edits short of
+the plugin id itself) are allowed and PREFERRED over deprecation
+theater. Dead params get nuked and ids stay dense (enforced by
+`state::tests::param_table_matches_store`). This policy inverts at
+1.0, at which point the template's never-renumber rule takes over.
