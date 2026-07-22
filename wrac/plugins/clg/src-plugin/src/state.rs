@@ -24,7 +24,8 @@ use crate::plugin::{
     param_default, param_exists,
 };
 
-pub(crate) const PARAM_SLOTS: usize = 31;
+// Derived from the param table — never hand-sized again (M7 lesson).
+pub(crate) const PARAM_SLOTS: usize = crate::plugin::PARAM_COUNT;
 
 /// Satellite presets, mirroring the `clg` CLI (`--sats`).
 type SatPreset = (
@@ -170,6 +171,20 @@ mod tests {
     /// M4 fix round: replicate the host param path exactly (set via the
     /// same entry the flush/process events use), then render through the
     /// engine — dust on/off must differ audibly (Sam: "no difference").
+    /// The M7 no-sound bug, made structurally impossible: every param id
+    /// must index inside the atomic store, and ids must be dense 0..COUNT
+    /// (the store is indexed by id directly).
+    #[test]
+    fn param_table_matches_store() {
+        for id in 0..crate::plugin::PARAM_COUNT as u32 {
+            assert!(
+                crate::plugin::param_exists(id),
+                "param id {id} missing: table not dense"
+            );
+        }
+        assert!(!crate::plugin::param_exists(crate::plugin::PARAM_COUNT as u32));
+    }
+
     #[test]
     fn dust_reaches_engine_via_host_path() {
         let sr = 44100.0f32;

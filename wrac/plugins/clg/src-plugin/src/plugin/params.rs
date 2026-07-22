@@ -223,6 +223,12 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_EX_TIME_ID, "Ex Time", 0.0, 1.0, 0.5, Format::Percent),
 ];
 
+/// The single source of truth for the parameter-store size. The
+/// SharedState atomic array derives from this so the table and the store
+/// can never disagree again (the M7 no-sound bug: table grew to 34, store
+/// stayed 31 — reading param 31 panicked the audio thread).
+pub(crate) const PARAM_COUNT: usize = PARAM_SPECS.len();
+
 fn param_spec(id: u32) -> PluginResult<&'static ParameterSpec> {
     PARAM_SPECS
         .iter()
