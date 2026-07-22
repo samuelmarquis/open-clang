@@ -21,6 +21,23 @@ pub enum Arch {
     Bar,
 }
 
+/// M7 — the exciter family (the architecture's "acoustic shader" slot).
+/// All exciters emit a FORCE signal consumed by the bank drive path;
+/// everything band-limited per the clean-fucked-fidelity doctrine
+/// (PATHS-NOT-TAKEN 005: richness through mechanism, never waveshaping).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Exciter {
+    /// Hann contact pulse (the M3 original; default).
+    Mallet,
+    /// E2 — shaped noise burst: the slap/brush family.
+    Burst,
+    /// E3 — stochastic click train, power-law amplitudes, rate riding the
+    /// bank's own energy: crumple that dies with the body (Cirio, 01 §A.5).
+    Buckling,
+    /// E5 — single-sample impulse + optional soften/DC-kick tail. Clean.
+    Raw,
+}
+
 /// Flat, Copy, one knob per field (template §3). The Bracing/Size macros
 /// live in the shells; the engine takes the granular laws.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +106,15 @@ pub struct EngineParams {
     /// spectral ramp: acts on the LOW region (up to 90° at 1.0) — the
     /// vast-sub knob, complement to floor-0 decoherence.
     pub sub_rotate: f32,
+    // M7 — exciter family
+    pub exciter: Exciter,
+    /// generic exciter shape: Mallet = stiffness trim (0.5 = neutral),
+    /// Burst = dark..bright, Buckling = click sharpness, Raw = soften LP.
+    pub ex_color: f32,
+    /// generic exciter time: Mallet = contact-time scale (0.5 = 1x),
+    /// Burst = length 2..80 ms, Buckling = base rate 30..900 /s,
+    /// Raw = DC-kick tail 0..30 ms.
+    pub ex_time: f32,
 }
 
 impl Default for EngineParams {
@@ -132,6 +158,9 @@ impl Default for EngineParams {
             mode_spread: 0.0,
             damp_asym: 0.0,
             sub_rotate: 0.0,
+            exciter: Exciter::Mallet,
+            ex_color: 0.5,
+            ex_time: 0.5,
         }
     }
 }
@@ -229,6 +258,17 @@ pub struct Engine {
     a_hp: f32,  // dust bandpass HP corner 1.5 kHz
     a_lp: f32,  // dust bandpass LP corner 6.5 kHz
     a_es: f32,  // NL1 e_smooth per-ctrl-block coefficient, tau ~6.9 ms
+    // M7 — exciter state (fixed, no alloc)
+    exc_lp1: f32,     // color filter chain (2x one-pole LP)
+    exc_lp2: f32,
+    exc_hp: f32,      // burst dark/bright HP state
+    exc_a_lp: f32,    // color coeffs, sr-derived at trigger
+    exc_a_hp: f32,
+    buck_rate0: f32,  // buckling base rate (clicks/s)
+    next_click: usize,
+    clicks_left: u32, // runaway backstop (cap per trigger)
+    clicks_fired: u32,
+    raw_tail_len: usize,
 }
 
 fn db_to_lin(db: f32) -> f32 {
@@ -286,7 +326,22 @@ impl Engine {
             a_hp,
             a_lp,
             a_es,
+            exc_lp1: 0.0,
+            exc_lp2: 0.0,
+            exc_hp: 0.0,
+            exc_a_lp: 0.0,
+            exc_a_hp: 0.0,
+            buck_rate0: 0.0,
+            next_click: 0,
+            clicks_left: 0,
+            clicks_fired: 0,
+            raw_tail_len: 0,
         }
+    }
+
+    /// Buckling clicks fired since trigger (QC/viz).
+    pub fn clicks(&self) -> u32 {
+        self.clicks_fired
     }
 
     /// Total contact-samples (L + R banks).
@@ -495,11 +550,55 @@ impl Engine {
         self.detuned = p.decohere > 0.0 || p.damp_asym > 0.0;
         self.update_coeffs(1.0);
 
-        // force pulse: Hann, contact time from stiffness(+brace via shell) & velocity
-        let stiff = (p.stiffness + 0.30 * p.brace_coupling).min(1.0);
-        let tau = 0.004 * (1.0 - 0.75 * stiff) / (0.35 + 0.65 * p.velocity);
-        self.pulse_len = ((self.sr * tau) as usize).max(8);
-        self.pulse_pos = 0;
+        // M7 exciter arming. Mallet at ex_color/ex_time = 0.5 is EXACTLY the
+        // M3 law (color adds 0.25*(c-0.5) to stiffness = +0.0; time scales
+        // tau by 4^(0.5-t) = *1.0) — default bit-identity is load-bearing.
+        self.exc_lp1 = 0.0;
+        self.exc_lp2 = 0.0;
+        self.exc_hp = 0.0;
+        self.clicks_fired = 0;
+        let sr = self.sr;
+        let color = p.ex_color.clamp(0.0, 1.0);
+        let ext = p.ex_time.clamp(0.0, 1.0);
+        match p.exciter {
+            Exciter::Mallet => {
+                let stiff = (p.stiffness + 0.30 * p.brace_coupling + 0.25 * (color - 0.5))
+                    .clamp(0.0, 1.0);
+                let tau = 0.004 * (1.0 - 0.75 * stiff) / (0.35 + 0.65 * p.velocity)
+                    * (4.0f32).powf(0.5 - ext);
+                self.pulse_len = ((sr * tau) as usize).max(8);
+                self.pulse_pos = 0;
+                self.clicks_left = 0;
+            }
+            Exciter::Burst => {
+                let ms = 2.0 * (40.0f32).powf(ext); // 2..80 ms, log
+                self.pulse_len = ((sr * ms / 1000.0) as usize).max(16);
+                self.pulse_pos = 0;
+                self.clicks_left = 0;
+                let lp_cut = (2000.0 * (4.5f32).powf(color)).min(0.4 * sr);
+                let hp_cut = 200.0 * (5.0f32).powf(color);
+                self.exc_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
+                self.exc_a_hp = (-2.0 * core::f32::consts::PI * hp_cut / sr).exp();
+            }
+            Exciter::Buckling => {
+                // no pulse: the click train IS the excitation
+                self.pulse_len = 0;
+                self.pulse_pos = usize::MAX;
+                self.buck_rate0 = 30.0 * (30.0f32).powf(ext); // 30..900 /s
+                self.next_click = 0;
+                self.clicks_left = 600; // runaway backstop, never musical
+                let lp_cut = (1500.0 * (8.0f32).powf(color)).min(0.4 * sr);
+                self.exc_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
+            }
+            Exciter::Raw => {
+                self.raw_tail_len = (ext * 0.030 * sr) as usize; // 0..30 ms DC-kick
+                self.pulse_len = self.raw_tail_len.max(1);
+                self.pulse_pos = 0;
+                self.clicks_left = 0;
+                let lp_cut = (500.0 * (40.0f32).powf(color)).min(0.45 * sr);
+                self.exc_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
+            }
+        }
         self.glide_r2 = (2.0f32).powf(p.glide_st / 6.0);
         self.e0 = 0.0;
         self.e_smooth = 0.0;
@@ -653,14 +752,97 @@ impl Engine {
             }
             self.ctrl_count -= 1;
 
-            // excitation force
-            let f_in = if self.pulse_pos < self.pulse_len {
-                let ph =
-                    core::f32::consts::PI * 2.0 * self.pulse_pos as f32 / self.pulse_len as f32;
-                self.pulse_pos += 1;
-                p.velocity * (0.5 - 0.5 * ph.cos())
-            } else {
-                0.0
+            // excitation force (M7: exciter family; Mallet path is the M3
+            // original, bit-identical at defaults)
+            let f_in = match p.exciter {
+                Exciter::Mallet => {
+                    if self.pulse_pos < self.pulse_len {
+                        let ph = core::f32::consts::PI * 2.0 * self.pulse_pos as f32
+                            / self.pulse_len as f32;
+                        self.pulse_pos += 1;
+                        p.velocity * (0.5 - 0.5 * ph.cos())
+                    } else {
+                        0.0
+                    }
+                }
+                Exciter::Burst => {
+                    if self.pulse_pos < self.pulse_len {
+                        let ph = core::f32::consts::PI * 2.0 * self.pulse_pos as f32
+                            / self.pulse_len as f32;
+                        self.pulse_pos += 1;
+                        let env = 0.5 - 0.5 * ph.cos();
+                        let n = self.white();
+                        // dark<->bright: HP then 2x one-pole LP (band-limited)
+                        self.exc_hp =
+                            self.exc_a_hp * self.exc_hp + (1.0 - self.exc_a_hp) * n;
+                        let hp = n - self.exc_hp;
+                        self.exc_lp1 =
+                            self.exc_a_lp * self.exc_lp1 + (1.0 - self.exc_a_lp) * hp;
+                        self.exc_lp2 = self.exc_a_lp * self.exc_lp2
+                            + (1.0 - self.exc_a_lp) * self.exc_lp1;
+                        2.2 * p.velocity * env * self.exc_lp2
+                    } else {
+                        0.0
+                    }
+                }
+                Exciter::Buckling => {
+                    // click train: power-law amplitudes, rate AND strength
+                    // riding the bank's own energy — crumple dies with the
+                    // body (plus a 30 ms warmup window so the first clicks
+                    // exist before any energy does). Passivity notes: click
+                    // strength scales sqrt(e_norm), so re-injection weakens
+                    // as the bank calms — convergent, no limit cycle; the
+                    // clicks_left cap is a pure backstop.
+                    let mut imp = 0.0f32;
+                    if self.clicks_left > 0 {
+                        if self.next_click == 0 {
+                            let u = (0.5 * (self.white() + 1.0)).clamp(1e-4, 1.0);
+                            let a = (u.powf(-1.0 / 1.5)).min(3.0) / 3.0; // power law
+                            let drive_env =
+                                self.e_norm.max((1.0 - self.t / 0.03).max(0.0));
+                            imp = 2.0 * p.velocity * a * drive_env.sqrt();
+                            self.clicks_left -= 1;
+                            self.clicks_fired += 1;
+                            let u2 = (0.5 * (self.white() + 1.0)).clamp(1e-3, 1.0);
+                            let rate = self.buck_rate0 * self.e_norm.max(0.04);
+                            let mean = (self.sr / rate).max(2.0);
+                            let iv = (mean * -(u2.ln())).clamp(0.25 * mean, 4.0 * mean);
+                            self.next_click = iv as usize;
+                        } else {
+                            self.next_click -= 1;
+                        }
+                    }
+                    // click sharpness: 3x one-pole LP (band-limited pulse;
+                    // 18 dB/oct meets the >=60 dB @ 0.45 sr doctrine spec —
+                    // exc_hp is unused by this exciter and serves as stage 3)
+                    self.exc_lp1 =
+                        self.exc_a_lp * self.exc_lp1 + (1.0 - self.exc_a_lp) * imp;
+                    self.exc_lp2 = self.exc_a_lp * self.exc_lp2
+                        + (1.0 - self.exc_a_lp) * self.exc_lp1;
+                    self.exc_hp = self.exc_a_lp * self.exc_hp
+                        + (1.0 - self.exc_a_lp) * self.exc_lp2;
+                    3.6 * self.exc_hp
+                }
+                Exciter::Raw => {
+                    let mut f = 0.0f32;
+                    if self.pulse_pos == 0 {
+                        f = 2.0 * p.velocity; // the impulse
+                    }
+                    if self.pulse_pos < self.raw_tail_len {
+                        // DC-kick: smooth LF bump (band-limited by shape)
+                        let ph = core::f32::consts::PI * self.pulse_pos as f32
+                            / self.raw_tail_len as f32;
+                        f += 0.35 * p.velocity * ph.sin();
+                    }
+                    if self.pulse_pos < self.pulse_len {
+                        self.pulse_pos += 1;
+                    }
+                    // soften LP (color): 2x one-pole
+                    self.exc_lp1 = self.exc_a_lp * self.exc_lp1 + (1.0 - self.exc_a_lp) * f;
+                    self.exc_lp2 =
+                        self.exc_a_lp * self.exc_lp2 + (1.0 - self.exc_a_lp) * self.exc_lp1;
+                    self.exc_lp2
+                }
             };
 
             // cascade drive envelope

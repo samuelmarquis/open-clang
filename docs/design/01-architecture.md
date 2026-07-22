@@ -182,8 +182,10 @@ sizes ~24×24..48×48; CFL at the limit.
 
 ### Post section
 
-- **Drive**: waveshaper with an *optional* non-anti-aliased mode
-  (aliasing as material, clearly labeled).
+- **Drive**: DEMOTED (2026-07-22, PATHS-NOT-TAKEN 005) — the
+  clean-fucked-fidelity doctrine: harmonic richness through
+  mechanism, never waveshaping. Revisit only in a post-panel effects
+  era.
 - **Convolution slot**: short IRs (≤ ~1.5 s) for material transfer
   (struck-object recordings, not halls); partitioned, zero-latency
   head.

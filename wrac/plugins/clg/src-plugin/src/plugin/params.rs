@@ -43,6 +43,10 @@ pub(crate) const PARAM_RATTLE_LEVEL_ID: u32 = 27;
 pub(crate) const PARAM_MODE_SPREAD_ID: u32 = 28;
 pub(crate) const PARAM_DAMP_ASYM_ID: u32 = 29;
 pub(crate) const PARAM_SUB_ROTATE_ID: u32 = 30;
+// M7 — the exciter family (additive ABI, 2026-07-22)
+pub(crate) const PARAM_EXCITER_ID: u32 = 31;
+pub(crate) const PARAM_EX_COLOR_ID: u32 = 32;
+pub(crate) const PARAM_EX_TIME_ID: u32 = 33;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +173,7 @@ const fn bypass(id: u32) -> ParameterSpec {
 
 pub(crate) const ARCH_NAMES: &[&str] = &["Membrane", "Plate", "Bar"];
 pub(crate) const SATS_NAMES: &[&str] = &["None", "Wires", "Loose", "Trash"];
+pub(crate) const EXCITER_NAMES: &[&str] = &["Mallet", "Burst", "Buckling", "Raw"];
 const OFF_ON: &[&str] = &["Off", "On"];
 
 const PARAM_SPECS: &[ParameterSpec] = &[
@@ -211,6 +216,11 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_MODE_SPREAD_ID, "Mode Spread", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_DAMP_ASYM_ID, "Damp Asym", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_SUB_ROTATE_ID, "Sub Rotate", 0.0, 1.0, 0.0, Format::Percent),
+    // M7 — the exciter family ("acoustic shader" slot; clean-fucked-fidelity
+    // doctrine: band-limited force signals, no waveshaping)
+    choice(PARAM_EXCITER_ID, "Exciter", EXCITER_NAMES, 0.0),
+    continuous(PARAM_EX_COLOR_ID, "Ex Color", 0.0, 1.0, 0.5, Format::Percent),
+    continuous(PARAM_EX_TIME_ID, "Ex Time", 0.0, 1.0, 0.5, Format::Percent),
 ];
 
 fn param_spec(id: u32) -> PluginResult<&'static ParameterSpec> {

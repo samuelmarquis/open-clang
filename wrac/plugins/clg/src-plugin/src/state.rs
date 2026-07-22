@@ -10,7 +10,7 @@
 use atomic_float::AtomicF32;
 use std::sync::atomic::Ordering;
 
-use clg_engine::{apply_brace_macro, apply_size_macro, Arch, EngineParams, MAX_SATS};
+use clg_engine::{Exciter, apply_brace_macro, apply_size_macro, Arch, EngineParams, MAX_SATS};
 
 use crate::plugin::{
     PARAM_ARCH_ID, PARAM_BRACE_ID, PARAM_CASC_AMT_ID, PARAM_CASC_ATTACK_ID,
@@ -19,7 +19,8 @@ use crate::plugin::{
     PARAM_NAXIAL_ID, PARAM_OUTTILT_ID, PARAM_POSITION_ID, PARAM_SATS_ID, PARAM_STIFFNESS_ID,
     PARAM_T60_ID, PARAM_TILT_ID, PARAM_TUNE_ID, PARAM_WIDTH_ID, PARAM_DECOHERE_ID, PARAM_SFLOOR_ID,
     PARAM_SIZE_ID, PARAM_VELCURVE_ID, PARAM_RATTLE_LEVEL_ID, PARAM_MODE_SPREAD_ID,
-    PARAM_DAMP_ASYM_ID, PARAM_SUB_ROTATE_ID, param_clamp,
+    PARAM_DAMP_ASYM_ID, PARAM_SUB_ROTATE_ID, PARAM_EXCITER_ID, PARAM_EX_COLOR_ID,
+    PARAM_EX_TIME_ID, param_clamp,
     param_default, param_exists,
 };
 
@@ -142,6 +143,14 @@ impl SharedState {
             mode_spread: self.v(PARAM_MODE_SPREAD_ID),
             damp_asym: self.v(PARAM_DAMP_ASYM_ID),
             sub_rotate: self.v(PARAM_SUB_ROTATE_ID),
+            exciter: match self.v(PARAM_EXCITER_ID).round() as usize {
+                1 => Exciter::Burst,
+                2 => Exciter::Buckling,
+                3 => Exciter::Raw,
+                _ => Exciter::Mallet,
+            },
+            ex_color: self.v(PARAM_EX_COLOR_ID),
+            ex_time: self.v(PARAM_EX_TIME_ID),
             dust_thr_db: self.v(PARAM_DUST_THR_ID),
             dust_follow: self.v(PARAM_DUST_FOLLOW_ID),
             ..EngineParams::default()

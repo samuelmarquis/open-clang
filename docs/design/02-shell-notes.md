@@ -240,3 +240,36 @@ identical vs pre-round render at all-defaults):
   dual-rotor path (any decohere/damp-asym > 0).
 - Cost: everything-on 2 s render = 0.074 s wall (≈27× real-time,
   single voice, release).
+
+## M7 — the exciter family (2026-07-22)
+
+The architecture's "acoustic shader" slot, completed under the
+clean-fucked-fidelity doctrine (PNT 005): all exciters are band-limited
+FORCE signals into the existing bank drive path; no waveshaping anywhere.
+
+**Params (additive ABI; table now 0–33):**
+
+| id | name | notes |
+|----|------|-------|
+| 31 | Exciter | Mallet / Burst / Buckling / Raw |
+| 32 | Ex Color | Mallet: stiffness trim (0.5 neutral); Burst: dark↔bright (LP 2k→9k, HP 200→1k); Buckling: click sharpness (3× one-pole LP 1.5k→12k); Raw: soften LP 500 Hz→20 k |
+| 33 | Ex Time | Mallet: contact-time ×4^(0.5−t) (0.5 = 1×); Burst: length 2–80 ms log; Buckling: base rate 30–900 clicks/s log; Raw: DC-kick tail 0–30 ms |
+
+**Laws:** Mallet at 0.5/0.5 is bit-identical to M3 (regression-proven).
+Burst: seeded xorshift noise × Hann env through HP + 2× one-pole LP.
+Buckling: stochastic click train, power-law amplitudes (u^(−1/1.5)
+clamped), exponential inter-click intervals with rate = rate0 ×
+max(e_norm, 0.04) and click strength × √e_norm (+30 ms warmup window) —
+crumple rides and dies with the bank's own energy; passivity by
+weakening re-injection (no clamped-force feedback, per the satellite
+lesson); 600-click backstop cap. 3× one-pole click filter meets the
+band-limit spec: renders measure −64 dB above 0.45·sr. Raw: 1-sample
+impulse (+optional sin-bump DC-kick tail) through 2× one-pole LP;
+−126 dB above 0.45·sr.
+
+**QC:** defaults regression bit-identical vs pre-M7 build (git-stash
+A/B, `cmp` clean). Buckling die-off measured on plate f50: HF click
+events 299/1136/1128/6 across 0–100/100–300/300–600/600–1000 ms — the
+crumple follows the body's energy and dies. Listening set:
+out/exciters-v1/ (17 files: 4 exciters × 3 bodies + buckling ex-time
+sweep + burst color pair).

@@ -74,3 +74,22 @@ which is the part of the mechanism that earned its keep.
 "(deprecated)") for ABI hygiene; if a future control wants the slot,
 that's a release-boundary decision. DSP re-entry is trivial (unforce
 the zero in state.rs) if taste reverses again.
+
+## 005 — Post-drive / saturation / deliberate aliasing (the Microtonic pole)
+
+**What:** the architecture's "anti-physical pole": a post waveshaper
+with an optional non-anti-aliased mode — grit by deliberate
+imperfection.
+**Why deferred:** Sam, 2026-07-22: "I'm not too interested in
+traditional distortion/drive/saturation/clipping … Part of the
+'fucked fidelity' that I like is *clean* — getting the types of
+harmonic richness that usually come from distortion without any of
+the ugliness/(Bad) noise." The doctrine is now: richness through
+MECHANISM (cascade, collisions, buckling, alignment), not
+waveshaping.
+**What hides there:** the whole classic drive palette, and the
+original Batch-001 north-star phrasing that seemed to point here.
+**Re-entry notes:** revisit only in an effects-section era (post-
+panel), as an explicitly optional stage. The Microtonic *lesson*
+(digital rawness as material) survives elsewhere — dust, raw exciter,
+stochastic cascade — without a waveshaper.
