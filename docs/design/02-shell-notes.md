@@ -283,3 +283,10 @@ the plugin id itself) are allowed and PREFERRED over deprecation
 theater. Dead params get nuked and ids stay dense (enforced by
 `state::tests::param_table_matches_store`). This policy inverts at
 1.0, at which point the template's never-renumber rule takes over.
+
+Practical corollary (Sam, 2026-07-22): Ableton caches the plugin's
+parameter interface in the project file, so ANY param-list change
+forces him to delete and rebuild his patch. Renumbering is therefore
+free — but it also means param additions have a per-round human cost:
+**batch new params into as few rounds as possible** rather than
+dribbling them in.
