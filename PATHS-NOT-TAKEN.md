@@ -23,6 +23,15 @@ interconnections (research 01 §A.7); marimba-adjacent territory if the
 project ever wants pitched percussion.
 **Re-entry notes:** n/a — never fully left. This entry stands as the
 record of a one-day deferral and why it bounced.
+**M13 update (2026-07-23):** the hidden thing was BUILT — the
+fittings network (params 53–56): a feed-forward chain of rattling
+hardware resonators hung off any body, bar as showcase. The
+"Corpus" complaint was diagnosed structurally (a bare bar IS a
+Corpus patch — clean sparse inharmonic ratios); the bet is that
+clattering hardware is what a bar needed to become an object.
+Verdict on the bet: Sam's ears, `out/net-v1/` (bare-vs-netted A/B).
+This entry closes when he rules — bar either earns its place or
+dies having been given every chance the physics could offer.
 
 ## 002 — Traditional pitch envelope alongside NL1 (Batch 002)
 

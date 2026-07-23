@@ -18,6 +18,8 @@ pub const R2_MODES: usize = 12; // M10: resonant (snare-side) head bank
 pub const CAV_MODES: usize = 4; // M10: cavity air modes (Helmholtz + pipe)
 pub const BED_BQ: usize = 6; // M10: bed band-limit biquad sections (order 12)
 pub const N_WIRES: usize = 16; // M11: wire-bank resonators (Net1)
+pub const N_NET: usize = 8; // M13: rattling-interconnection fittings (Net1 proper)
+pub const NET_PARTIALS: usize = 3; // partials per fitting (small hardware voice)
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Arch {
@@ -172,6 +174,28 @@ pub struct EngineParams {
     /// above f0 (mode-weight redistribution at trigger, energy-
     /// compensated like the transect tilt; no post-EQ). 0 = legacy.
     pub root_weight: f32,
+    // M13 — the fittings network (Net1 rattling interconnections; the
+    // bar rescue). A CHAIN of small hardware resonators ("fittings"),
+    // each in unilateral rattling contact with the element before it:
+    // fitting 0 rides the body's net-volume motion, fitting k rides
+    // fitting k−1's voice — energy moves in buzzy intermittent bursts,
+    // never politely. STRICTLY FEED-FORWARD (v1 decision): no reaction
+    // back up the chain and none onto the body — zero new feedback
+    // loops, passive by construction (each stage only extracts from a
+    // decaying source; the M11 feed² law keeps late contacts quiet).
+    /// 0..1 — network level (mix vs bank peak, satellite pattern).
+    /// 0 = fully off, bit-exact legacy.
+    pub net: f32,
+    /// 0..1 — chain length: 2..8 fittings. Deeper chain = later,
+    /// more mangled generations of clatter.
+    pub net_density: f32,
+    /// 0..1 — mounting tension: loose (wide gaps, slow return
+    /// springs — sparse slappy clatter) ↔ tight (small gaps, fast
+    /// springs — dense pressed buzz).
+    pub net_tension: f32,
+    /// fitting family base frequency, Hz (per-fitting golden-salted
+    /// ±0.8 oct; inharmonic hardware partials ride it).
+    pub net_tune: f32,
     // STEREO v1 (M5): per-mode L/R decoherence. Both default 0 = the
     // canonical mono voice, bit-identical in both channels.
     /// 0..1 — per-mode L/R phase divergence (zero below 4·f0: the sub
@@ -266,6 +290,10 @@ impl Default for EngineParams {
             wire_decay: 0.45,
             wire_throw: 0.5,
             root_weight: 0.0,
+            net: 0.0,
+            net_density: 0.5,
+            net_tension: 0.5,
+            net_tune: 1100.0,
             decohere: 0.0,
             stereo_floor: 0.3,
             rattle_level: 0.5,
@@ -570,6 +598,56 @@ pub struct Engine {
     wire_react: f32, // this-sample reaction force onto the head
     wire_bq: [[f32; 2]; BED_BQ], // radiation band-limit (own Cheby-II
                                  // state, shared coefficients)
+    // M13 — the fittings network (Net1 rattling interconnections).
+    // Feed-forward chain: body → fitting 0 → fitting 1 → …; each link
+    // is a satellite-class unilateral contact in its own NORMALIZED
+    // frame (running support peak), with the M11 feed² law (contact
+    // loudness rides the support's real envelope squared) so the
+    // clatter dies with its source. No reaction anywhere: zero new
+    // feedback loops (the M12.1 lesson, applied at design time).
+    net_on: bool,
+    n_net: usize,
+    net_z: [f32; N_NET],   // rattling DOF above the support plane
+    net_vz: [f32; N_NET],
+    net_omz: [f32; N_NET], // return-spring ω (tension-scaled, salted)
+    net_rest: [f32; N_NET], // gap (tension-scaled, salted, floored 0.05)
+    net_incontact: [bool; N_NET],
+    net_speak: [f32; N_NET], // per-link running peak of |support|
+    net_env: [f32; N_NET],   // per-link smoothed |support_n| (feed² law)
+    net_sdp: [f32; N_NET],   // previous support displacement (velocity)
+    // fitting voices: small inharmonic hardware partials (coupled-form)
+    net_pu: [[f32; NET_PARTIALS]; N_NET],
+    net_pv: [[f32; NET_PARTIALS]; N_NET],
+    net_pcw: [[f32; NET_PARTIALS]; N_NET],
+    net_psw: [[f32; NET_PARTIALS]; N_NET],
+    net_prr: [[f32; NET_PARTIALS]; N_NET],
+    net_pamp: [[f32; NET_PARTIALS]; N_NET],
+    net_pgl: [f32; N_NET], // per-fitting equal-power pan (stereo only)
+    net_pgr: [f32; N_NET],
+    // M12.1 entry-rate fuse, net arm (same thresholds as satellites)
+    net_er: [f32; N_NET],
+    net_hot: [u32; N_NET],
+    net_cool: [u32; N_NET],
+    net_entries: u32,
+    net_lp1: f32, // radiation smoother (M8 pattern: 2× one-pole @10 k)
+    net_lp2: f32,
+    net_lp1r: f32,
+    net_lp2r: f32,
+    net_peak: f32, // radiation running peak (mix normalizer)
+    // M13 — the lifetime watchdog (Sam's law: a voice must DIE).
+    // Ceiling = max(4 s, 2.25 × the patch's own longest T60), capped
+    // 30 s — patch-derived so gong-country tails (t60 4 s × low bonus
+    // rings ~11 s to −90 dB) are never chopped, while every hostile
+    // config (the quiet-immortal-floor class) has a bounded lifetime
+    // and a guaranteed CPU release. Healthy voices sleep at −90 dB
+    // long before their ceiling: the watchdog changes NO healthy
+    // render (verified by the null matrix). At ceiling: 250 ms fade,
+    // then dead. Latched at trigger like every other param read.
+    wd_ceiling: f32,
+    wd_fade: u32,
+    wd_g: f32,
+    wd_dead: bool,
+    wd_kills: u32,
 }
 
 fn db_to_lin(db: f32) -> f32 {
@@ -816,6 +894,38 @@ impl Engine {
             wire_peak: 1e-12,
             wire_react: 0.0,
             wire_bq: [[0.0; 2]; BED_BQ],
+            net_on: false,
+            n_net: 0,
+            net_z: [0.0; N_NET],
+            net_vz: [0.0; N_NET],
+            net_omz: [0.0; N_NET],
+            net_rest: [0.0; N_NET],
+            net_incontact: [false; N_NET],
+            net_speak: [1e-9; N_NET],
+            net_env: [0.0; N_NET],
+            net_sdp: [0.0; N_NET],
+            net_pu: [[0.0; NET_PARTIALS]; N_NET],
+            net_pv: [[0.0; NET_PARTIALS]; N_NET],
+            net_pcw: [[0.0; NET_PARTIALS]; N_NET],
+            net_psw: [[0.0; NET_PARTIALS]; N_NET],
+            net_prr: [[0.0; NET_PARTIALS]; N_NET],
+            net_pamp: [[0.0; NET_PARTIALS]; N_NET],
+            net_pgl: [1.0; N_NET],
+            net_pgr: [1.0; N_NET],
+            net_er: [0.0; N_NET],
+            net_hot: [0; N_NET],
+            net_cool: [0; N_NET],
+            net_entries: 0,
+            net_lp1: 0.0,
+            net_lp2: 0.0,
+            net_lp1r: 0.0,
+            net_lp2r: 0.0,
+            net_peak: 1e-12,
+            wd_ceiling: 30.0,
+            wd_fade: 0,
+            wd_g: 0.0,
+            wd_dead: false,
+            wd_kills: 0,
         }
     }
 
@@ -851,6 +961,26 @@ impl Engine {
         self.airbag_trips
     }
 
+    /// M13 — this voice's lifetime ceiling in seconds (patch-derived,
+    /// set at trigger). The watchdog fades the voice out at the
+    /// ceiling; healthy voices sleep at −90 dB long before it.
+    pub fn lifetime_ceiling(&self) -> f32 {
+        self.wd_ceiling
+    }
+
+    /// M13 — watchdog kill count. Kills on HOSTILE configs are the
+    /// design (bounded lifetime, guaranteed CPU release); a kill on a
+    /// healthy patch is a bug (asserted zero by the null matrix +
+    /// long-gong gate).
+    pub fn watchdog_kills(&self) -> u32 {
+        self.wd_kills
+    }
+
+    /// M13 — net contact-entry events (QC visibility, satellite pattern).
+    pub fn net_entries(&self) -> u32 {
+        self.net_entries
+    }
+
     pub fn reset(&mut self) {
         for m in self.modes.iter_mut() {
             m.u = 0.0;
@@ -868,6 +998,10 @@ impl Engine {
         self.wire_v = [0.0; N_WIRES];
         self.wire_z = [0.0; N_WIRES];
         self.wire_vz = [0.0; N_WIRES];
+        self.net_z = [0.0; N_NET];
+        self.net_vz = [0.0; N_NET];
+        self.net_pu = [[0.0; NET_PARTIALS]; N_NET];
+        self.net_pv = [[0.0; NET_PARTIALS]; N_NET];
         self.seat_acc = [0.0; MAX_SATS];
         self.seat_acc_r = [0.0; MAX_SATS];
         self.x1_acc = 0.0;
@@ -876,6 +1010,8 @@ impl Engine {
         self.loud_env = 0.0;
         self.loud_run = 0;
         self.airbag = 0;
+        self.wd_fade = 0;
+        self.wd_dead = false;
     }
 
     fn mode_table(&mut self, p: &EngineParams) {
@@ -1538,6 +1674,112 @@ impl Engine {
             self.wire_react = 0.0;
             self.wire_bq = [[0.0; 2]; BED_BQ];
         }
+        // M13 — fittings-network arming (Net1 rattling interconnections;
+        // the bar rescue). Fixed-per-patch golden-salted hardware: chain
+        // length rides Net Density, gaps + return springs ride Net
+        // Tension (loose slappy ↔ tight buzzy), fitting voices are
+        // small inharmonic partial clusters around Net Tune. net = 0 →
+        // fully off, bit-exact.
+        self.net_on = p.net > 0.0;
+        if self.net_on {
+            let sr = self.sr;
+            let dens = p.net_density.clamp(0.0, 1.0);
+            let tens = p.net_tension.clamp(0.0, 1.0);
+            let tune = p.net_tune.clamp(150.0, 6000.0);
+            self.n_net = (2.0 + (6.0 * dens).round()).min(N_NET as f32) as usize;
+            for j in 0..self.n_net {
+                let s1 = ((j as f32 + 1.0) * PHI) % 1.0;
+                let s2 = ((j as f32 + 1.0) * PHI * 7.0) % 1.0;
+                let s3 = ((j as f32 + 1.0) * PHI * 13.0) % 1.0;
+                let s4 = ((j as f32 + 1.0) * PHI * 29.0) % 1.0;
+                // return spring: 40 Hz (loose) → 400 Hz (tight), log in
+                // tension, ×0.8–1.2 salt; ω·dt ≤ 0.06 ≪ the M12.1
+                // 0.5·sr clamp — applied anyway (hostile-sr insurance)
+                let spring_hz = 40.0 * (10.0f32).powf(tens) * (0.8 + 0.4 * s3);
+                self.net_omz[j] = (2.0 * core::f32::consts::PI * spring_hz)
+                    .clamp(20.0, 0.5 * sr);
+                // gap: loose ~0.3–0.7 (sparse slaps) → tight ~0.05–0.12
+                // (dense buzz); the M8 gap floor 0.05 is a LAW (a gap→0
+                // unilateral reaction is a pump — even without reaction
+                // here, 100% duty is chatter for free, keep it out)
+                self.net_rest[j] =
+                    ((0.5 - 0.42 * tens) * (0.6 + 0.8 * s1)).max(0.05);
+                self.net_z[j] = self.net_rest[j];
+                self.net_vz[j] = 0.0;
+                self.net_incontact[j] = false;
+                self.net_speak[j] = 1e-9;
+                self.net_env[j] = 0.0;
+                self.net_sdp[j] = 0.0;
+                self.net_er[j] = 0.0;
+                self.net_hot[j] = 0;
+                self.net_cool[j] = 0;
+                // fitting voice: base ±0.8 oct around Net Tune, metal-
+                // hardware inharmonic partials, SHORT clatter decays
+                // (higher partials die faster, the ratio^-0.7 law)
+                let fb = (tune * (2.0f32).powf(1.6 * (s1 - 0.5)))
+                    .clamp(120.0, 0.40 * sr);
+                let ratios = [1.0f32, 2.2 + 0.9 * s2, 3.9 + 1.6 * s4];
+                let amps = [1.0f32, 0.55, 0.3];
+                let t60b = 0.05 + 0.13 * s2;
+                for q in 0..NET_PARTIALS {
+                    // placement capped 0.42·sr — tonal peaks stay clear
+                    // of the 0.45·sr doctrine wall (the wire-bank
+                    // convention); the 2×10 k smoother owns click edges
+                    let f = (fb * ratios[q]).min(0.42 * sr);
+                    let w = 2.0 * core::f32::consts::PI * f / sr;
+                    self.net_pcw[j][q] = w.cos();
+                    self.net_psw[j][q] = w.sin();
+                    let t60q = (t60b * ratios[q].powf(-0.7)).max(1e-3);
+                    self.net_prr[j][q] = (-6.9078 / (t60q * sr)).exp();
+                    self.net_pamp[j][q] = amps[q];
+                    self.net_pu[j][q] = 0.0;
+                    self.net_pv[j][q] = 0.0;
+                }
+                // equal-power pan salt (engaged only when the voice is
+                // stereo; mono path radiates the plain sum — the
+                // channels-bit-identical invariant holds)
+                let pan = 0.9 * (2.0 * s4 - 1.0);
+                let phi_p = core::f32::consts::FRAC_PI_4 * (1.0 + pan);
+                self.net_pgl[j] = core::f32::consts::SQRT_2 * phi_p.cos();
+                self.net_pgr[j] = core::f32::consts::SQRT_2 * phi_p.sin();
+            }
+            self.net_lp1 = 0.0;
+            self.net_lp2 = 0.0;
+            self.net_lp1r = 0.0;
+            self.net_lp2r = 0.0;
+            self.net_peak = 1e-12;
+            self.net_entries = 0;
+        }
+        // M13 — the lifetime watchdog ceiling (Sam's law: a voice must
+        // DIE — he will stack pounds of compression downstream, so a
+        // quiet immortal floor is an audible defect AND a CPU leak).
+        // Patch-derived: 2.25 × the longest active T60 (time to −90 dB
+        // is 1.5×T60; ×1.5 safety), floored at his 4 s, capped 30 s
+        // (hostile-param sanity). Healthy voices sleep at −90 dB well
+        // before this — the watchdog changes no healthy render.
+        {
+            let mut max_t60 = 0.0f32;
+            for m in self.modes[..self.n_modes].iter() {
+                max_t60 = max_t60.max(m.t60);
+            }
+            for j in 0..self.n_sats {
+                max_t60 = max_t60.max(p.sat_t60[j]);
+            }
+            if self.wire_on {
+                max_t60 = max_t60.max(p.wire_decay.clamp(0.05, 2.0) * 1.25);
+            }
+            if self.cav_on {
+                max_t60 = max_t60.max(0.56); // ringing head2 lows
+            }
+            if p.dust_level > 0.0 {
+                // bed release knob IS perceived T60 (the M11 recalibration)
+                max_t60 =
+                    max_t60.max(0.15 * (10.0f32).powf(p.bed_release.clamp(0.0, 1.0)));
+            }
+            self.wd_ceiling = (2.25 * max_t60).max(4.0).min(30.0);
+        }
+        self.wd_fade = 0;
+        self.wd_dead = false;
         self.active = true;
     }
 
@@ -2284,7 +2526,7 @@ impl Engine {
             let react_any = sat_react[..n_sats].iter().any(|&x| x != 0.0);
             let react_any_r = sat_react_r[..n_sats].iter().any(|&x| x != 0.0);
             // M12 perf: fused previous-sample taps for NEXT sample
-            let need_x1 = self.wire_on || self.cav_on;
+            let need_x1 = self.wire_on || self.cav_on || self.net_on;
             let mut acc_seat = [0.0f32; MAX_SATS];
             let mut acc_seat_r = [0.0f32; MAX_SATS];
             let mut acc_x1 = 0.0f32;
@@ -2493,6 +2735,135 @@ impl Engine {
                 }
             }
 
+            // M13 — the fittings network (Net1 rattling interconnections).
+            // Feed-forward chain evaluated in link order: fitting 0's
+            // support is the body's net-volume tap (this sample — the
+            // mode loop above just built it), fitting k's support is
+            // fitting k−1's voice, computed earlier in this same loop.
+            // Each link: normalized frame (running support peak, the
+            // satellite lesson), unilateral floored-gap contact, entry
+            // events ring the fitting's hardware partials, feed² law
+            // (contact loudness rides the support's real envelope
+            // squared — the clatter dies with its source). No reaction
+            // anywhere: zero feedback loops by construction.
+            if self.net_on {
+                let mut rad_l = 0.0f32;
+                let mut rad_r = 0.0f32;
+                let mut prev_voice = 0.0f32;
+                let a_env = self.a_env;
+                for j in 0..self.n_net {
+                    let support = if j == 0 { self.x1_acc } else { prev_voice };
+                    // M12.1 fuse, net arm (satellite thresholds; a
+                    // fitting physically cannot re-enter contact
+                    // thousands of times a second for hundreds of ms)
+                    self.net_er[j] *= self.er_decay;
+                    if self.net_er[j] > 55.0 {
+                        self.net_hot[j] += 1;
+                    } else {
+                        self.net_hot[j] = 0;
+                    }
+                    if self.net_er[j] > 120.0
+                        || self.net_hot[j] as f32 > 0.3 * self.sr
+                    {
+                        self.net_cool[j] = (0.2 * self.sr) as u32;
+                        self.net_er[j] = 0.0;
+                        self.net_hot[j] = 0;
+                    }
+                    if self.net_cool[j] > 0 {
+                        self.net_cool[j] -= 1;
+                        self.net_z[j] = self.net_rest[j];
+                        self.net_vz[j] = 0.0;
+                        self.net_incontact[j] = false;
+                    } else {
+                        self.net_speak[j] = self.net_speak[j].max(support.abs());
+                        let s_n = support / self.net_speak[j];
+                        let sv = ((s_n - self.net_sdp[j]) / dt).clamp(-4000.0, 4000.0);
+                        self.net_sdp[j] = s_n;
+                        self.net_env[j] =
+                            a_env * self.net_env[j] + (1.0 - a_env) * s_n.abs();
+                        let feed = (self.net_env[j] * self.net_env[j]).min(1.0);
+                        let pen = (s_n - self.net_z[j]).clamp(0.0, 2.0);
+                        let f_n = if pen > 0.0 { pen * pen.sqrt() } else { 0.0 };
+                        if pen > 0.0 && !self.net_incontact[j] {
+                            // entry loudness = approach speed (M8 law),
+                            // scaled by the link's own spring timescale
+                            let rel = (self.net_vz[j] - sv).abs();
+                            let hit = (f_n
+                                + 0.5 * (rel / (0.9 * self.net_omz[j])).min(3.0))
+                                * feed;
+                            for q in 0..NET_PARTIALS {
+                                self.net_pu[j][q] += hit * self.net_pamp[j][q];
+                            }
+                            self.net_entries += 1;
+                            self.net_er[j] += 1.0;
+                        }
+                        self.net_incontact[j] = pen > 0.0;
+                        // pressed scrape keeps the buzz fed (tight end)
+                        if pen > 0.0 {
+                            let scrape = 0.08 * f_n * feed;
+                            for q in 0..NET_PARTIALS {
+                                self.net_pu[j][q] += scrape * self.net_pamp[j][q];
+                            }
+                        }
+                        let omz = self.net_omz[j];
+                        let acc = -omz * omz * (self.net_z[j] - self.net_rest[j])
+                            - 0.6 * omz * self.net_vz[j]
+                            + 0.05 * omz * omz * f_n;
+                        self.net_vz[j] += dt * acc;
+                        self.net_z[j] += dt * self.net_vz[j];
+                        if !(self.net_z[j].is_finite() && self.net_vz[j].is_finite())
+                        {
+                            self.net_z[j] = self.net_rest[j];
+                            self.net_vz[j] = 0.0;
+                        }
+                    }
+                    // fitting voice: partial rotors ring; the sum is both
+                    // the radiation AND the next link's support surface
+                    let mut voice = 0.0f32;
+                    for q in 0..NET_PARTIALS {
+                        let pu = self.net_prr[j][q]
+                            * (self.net_pu[j][q] * self.net_pcw[j][q]
+                                - self.net_pv[j][q] * self.net_psw[j][q]);
+                        let pv = self.net_prr[j][q]
+                            * (self.net_pu[j][q] * self.net_psw[j][q]
+                                + self.net_pv[j][q] * self.net_pcw[j][q]);
+                        self.net_pu[j][q] = pu;
+                        self.net_pv[j][q] = pv;
+                        voice += pu * self.net_pamp[j][q];
+                    }
+                    prev_voice = voice;
+                    if stereo {
+                        // per-fitting equal-power pans: the hardware is
+                        // scattered across the field (salted at trigger)
+                        rad_l += voice * self.net_pgl[j];
+                        rad_r += voice * self.net_pgr[j];
+                    } else {
+                        // mono: plain sum both sides (bit-identical L/R)
+                        rad_l += voice;
+                        rad_r += voice;
+                    }
+                }
+                // radiation smoother (M8 pattern: contact-entry kicks are
+                // hard steps into the rotors; 2× one-pole @10 k softens
+                // the edges so the band-limit gate holds), then online
+                // normalization vs own peak, mixed vs the bank peak —
+                // dust_peak was tracked BEFORE this join (normalizer law)
+                self.net_lp1 = self.a_rad * self.net_lp1 + (1.0 - self.a_rad) * rad_l;
+                self.net_lp2 =
+                    self.a_rad * self.net_lp2 + (1.0 - self.a_rad) * self.net_lp1;
+                self.net_lp1r =
+                    self.a_rad * self.net_lp1r + (1.0 - self.a_rad) * rad_r;
+                self.net_lp2r =
+                    self.a_rad * self.net_lp2r + (1.0 - self.a_rad) * self.net_lp1r;
+                let (nl, nr) = (self.net_lp2, self.net_lp2r);
+                self.net_peak = self.net_peak.max(nl.abs().max(nr.abs()));
+                if self.net_peak > 1e-9 {
+                    let g = self.dust_peak * p.net.clamp(0.0, 1.0) * 0.8 / self.net_peak;
+                    yl += nl * g;
+                    yr += nr * g;
+                }
+            }
+
             // M11 — wire radiation: ring + crack through their own
             // Cheby-II gate (band-limit doctrine), normalized online
             // against their own running peak, mixed vs the bank peak
@@ -2688,6 +3059,23 @@ impl Engine {
                     self.active = false;
                 }
             }
+            // M13 watchdog: past the patch-derived ceiling, a gentle
+            // 250 ms fade, then the voice is DEAD (Sam's law — bounded
+            // lifetime, guaranteed CPU release; the dead latch keeps
+            // the block silent past the fade regardless of block size)
+            if self.wd_dead {
+                yl = 0.0;
+                yr = 0.0;
+            } else if self.wd_fade > 0 {
+                self.wd_fade -= 1;
+                let g = self.wd_fade as f32 * self.wd_g;
+                yl *= g;
+                yr *= g;
+                if self.wd_fade == 0 {
+                    self.wd_dead = true;
+                    self.active = false;
+                }
+            }
             out_l[i] = yl;
             out_r[i] = yr;
             let oa = yl.abs().max(yr.abs());
@@ -2719,6 +3107,20 @@ impl Engine {
                 self.airbag_g = 1.0 / self.airbag as f32;
                 self.airbag_trips += 1;
             }
+        }
+        // M13 watchdog arming (block rate): the voice has outlived its
+        // own patch's longest plausible decay — fade it out. Fires only
+        // on hostile state (healthy voices sleep first); never while
+        // the airbag is already handling a loud runaway.
+        if self.active
+            && !self.wd_dead
+            && self.wd_fade == 0
+            && self.airbag == 0
+            && self.t > self.wd_ceiling
+        {
+            self.wd_fade = ((0.25 * self.sr) as u32).max(1);
+            self.wd_g = 1.0 / self.wd_fade as f32;
+            self.wd_kills += 1;
         }
         let sleep_floor = (self.out_peak * 3.16e-5).max(1e-6);
         if peak < sleep_floor {
@@ -2920,6 +3322,228 @@ mod decay_gate {
     #[test]
     fn scream_repro_decays() {
         assert_decays("scream idx2979", &scream_config());
+    }
+
+    /// M13 — the watchdog gate: a config may fail to decay on its own
+    /// (the quiet-immortal-floor class), but its VOICE must die at the
+    /// patch-derived ceiling: engine inactive, output latched to zero,
+    /// zero airbag involvement (the watchdog is the quiet-class tool).
+    fn assert_dies_by_ceiling(name: &str, p: &EngineParams) {
+        let sr = 44100.0;
+        let mut e = Engine::new(sr);
+        e.trigger(p);
+        let ceil = e.lifetime_ceiling();
+        assert!(
+            (4.0..=30.0).contains(&ceil),
+            "{name}: ceiling {ceil} outside [4, 30]"
+        );
+        let total = ((ceil + 1.0) * sr) as usize;
+        let mut bl = [0.0f32; 256];
+        let mut br = [0.0f32; 256];
+        let mut done = 0usize;
+        let mut live = true;
+        while done < total {
+            live = e.process(&mut bl, &mut br);
+            for (&l, &r) in bl.iter().zip(br.iter()) {
+                assert!(l.is_finite() && r.is_finite(), "{name}: non-finite");
+            }
+            done += bl.len();
+            if !live {
+                break;
+            }
+        }
+        assert!(!live, "{name}: voice still alive past ceiling {ceil:.1}s");
+        assert!(
+            done as f32 / sr <= ceil + 0.5,
+            "{name}: died at {:.1}s, ceiling {ceil:.1}s",
+            done as f32 / sr
+        );
+    }
+
+    /// M13 — net-heavy config (bar + buckling + full chain at both
+    /// tension extremes + trash sats + wires): the new mechanism must
+    /// decay unassisted like everything else.
+    fn net_config(tension: f32) -> EngineParams {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Bar;
+        p.exciter = Exciter::Buckling;
+        p.f0 = 110.0;
+        p.velocity = 0.95;
+        p.t60_base = 0.9;
+        p.tilt = 0.9;
+        p.net = 1.0;
+        p.net_density = 1.0;
+        p.net_tension = tension;
+        p.net_tune = 1400.0;
+        p.sat_count = 3;
+        p.sat_fs = [1300.0, 2100.0, 3400.0, 0.0];
+        p.sat_t60 = [0.12, 0.10, 0.07, 0.1];
+        p.sat_seat = [0.18, 0.52, 0.80, 0.0];
+        p.sat_rest = [0.30, 0.45, 0.20, 0.0];
+        p.sat_level = [1.0, 0.9, 0.7, 0.0];
+        p.sat_pr = [[1.0, 1.34, 1.83, 2.51], [1.0, 1.47, 2.06, 2.9],
+                    [1.0, 1.62, 2.24, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.sat_pa = [[1.0, 0.7, 0.5, 0.35], [1.0, 0.65, 0.45, 0.3],
+                    [1.0, 0.6, 0.4, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.rattle_level = 0.8;
+        p.bounce = 0.5;
+        p.wires = 0.6;
+        p.wire_throw = 1.0;
+        p.dust_level = 0.5;
+        p.decohere = 0.4;
+        p
+    }
+
+    #[test]
+    fn net_heavy_decays() {
+        assert_decays("net tension 0.05", &net_config(0.05));
+        assert_decays("net tension 0.95", &net_config(0.95));
+    }
+
+    /// M13 — quiet-immortal-floor specimen (hunt seed 7 idx 299,
+    /// pre-M13: −46 dB eternal floor with a RISING slope — the class
+    /// Sam promoted: "pounds of compression downstream" makes a −46 dB
+    /// floor an audible defect and a CPU leak). The watchdog bounds it.
+    fn floor_config() -> EngineParams {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Plate;
+        p.exciter = Exciter::Buckling;
+        p.f0 = 56.39;
+        p.velocity = 0.891;
+        p.position = 0.910;
+        p.listen_pos = 0.421;
+        p.stiffness = 0.129;
+        p.t60_base = 3.534;
+        p.tilt = 0.467;
+        p.out_tilt_db_oct = 2.86;
+        p.glide_st = 4.11;
+        p.sat_count = 1;
+        p.sat_fs = [900.0, 0.0, 0.0, 0.0];
+        p.sat_t60 = [0.15, 0.1, 0.1, 0.1];
+        p.sat_seat = [0.45, 0.0, 0.0, 0.0];
+        p.sat_rest = [0.55, 0.0, 0.0, 0.0];
+        p.sat_level = [1.0, 0.0, 0.0, 0.0];
+        p.sat_pr = [[1.0, 2.7, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.sat_pa = [[1.0, 0.4, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.rattle_level = 0.517;
+        p.rattle_casc = 0.313;
+        p.bounce = 0.672;
+        p.rattle_gap = 0.389;
+        p.gap_vel = 0.397;
+        p.rattle_tune = -5.08 / 12.0;
+        p.rattle_track = 0.757;
+        p.walk = 0.440;
+        p.dust_level = 0.231;
+        p.dust_thr_db = -34.4;
+        p.dust_follow = 1.277;
+        p.bed_release = 0.508;
+        p.bed_source = 0.714;
+        p.bed_comb = 0.394;
+        p.bed_bright = 0.337;
+        p.cavity = 0.811;
+        p.cavity_tune = 209.06;
+        p.head2_tune = 3.69;
+        p.head2_damp = 0.952;
+        p.wires = 0.740;
+        p.wire_tune = 2441.4;
+        p.wire_decay = 0.333;
+        p.wire_throw = 0.829;
+        p.root_weight = 0.573;
+        p.decohere = 0.624;
+        p.stereo_floor = 0.602;
+        p.mode_spread = 0.215;
+        p.sub_rotate = 0.438;
+        p.ex_color = 0.494;
+        p.ex_time = 0.764;
+        p
+    }
+
+    #[test]
+    fn immortal_floor_dies_by_ceiling() {
+        // NOTE (honest): post-M12.1 this specimen decays NATURALLY at
+        // ~7.8 s (the fuse dissolved most of the quiet class at long
+        // horizons) — this asserts the BOUND (death ≤ ceiling), by
+        // whichever path. The watchdog kill path itself is proven
+        // deterministically by watchdog_kill_path_works below.
+        assert_dies_by_ceiling("floor idx299", &floor_config());
+    }
+
+    /// M13 — white-box proof of the watchdog kill path: force a tiny
+    /// ceiling on a healthy voice (whose tail long outlives it), then
+    /// assert arm → 250 ms fade → dead latch → inactive, exactly once.
+    #[test]
+    fn watchdog_kill_path_works() {
+        let sr = 44100.0;
+        let mut e = Engine::new(sr);
+        let mut p = EngineParams::default();
+        p.t60_base = 4.0; // long tail: would live seconds past 0.5 s
+        e.trigger(&p);
+        e.wd_ceiling = 0.5; // white-box: force the ceiling
+        let mut bl = [0.0f32; 256];
+        let mut br = [0.0f32; 256];
+        let total = (sr * 1.5) as usize;
+        let mut done = 0usize;
+        let mut live = true;
+        let mut last_nonzero = 0usize;
+        while done < total {
+            live = e.process(&mut bl, &mut br);
+            for (k, (&l, &r)) in bl.iter().zip(br.iter()).enumerate() {
+                if l != 0.0 || r != 0.0 {
+                    last_nonzero = done + k;
+                }
+            }
+            done += bl.len();
+            if !live {
+                break;
+            }
+        }
+        assert!(!live, "watchdog never killed the voice");
+        assert_eq!(e.watchdog_kills(), 1);
+        assert_eq!(e.airbag_trips(), 0);
+        let died_s = last_nonzero as f32 / sr;
+        assert!(
+            (0.5..0.85).contains(&died_s),
+            "fade window wrong: last audio at {died_s:.3} s (want 0.5–0.85)"
+        );
+    }
+
+    /// M13 — the long-gong guard: a LEGIT long tail (t60 4 s, coherent
+    /// cascade — gong country, the M10 coincidence-probe class) must
+    /// die NATURALLY (sleep at −90 dB), never by watchdog.
+    #[test]
+    fn long_gong_never_watchdogged() {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Plate;
+        p.f0 = 80.0;
+        p.velocity = 0.95;
+        p.t60_base = 4.0;
+        p.stiffness = 0.7;
+        p.cascade_amt = 0.5;
+        p.cascade_tau = 0.08;
+        p.cascade_coherent = true;
+        p.cascade_conserve = true;
+        let sr = 44100.0;
+        let mut e = Engine::new(sr);
+        e.trigger(&p);
+        let ceil = e.lifetime_ceiling();
+        assert!(ceil > 12.0, "gong ceiling too tight: {ceil}");
+        let mut bl = [0.0f32; 256];
+        let mut br = [0.0f32; 256];
+        let mut done = 0usize;
+        let total = (sr * (ceil + 1.0)) as usize;
+        let mut live = true;
+        while done < total {
+            live = e.process(&mut bl, &mut br);
+            done += bl.len();
+            if !live {
+                break;
+            }
+        }
+        assert!(!live, "gong never went to sleep");
+        assert_eq!(e.watchdog_kills(), 0, "watchdog chopped a legit gong tail");
+        assert_eq!(e.airbag_trips(), 0);
     }
 
     fn config_1432_a() -> EngineParams {

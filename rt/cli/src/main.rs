@@ -22,7 +22,7 @@ fn main() {
         return;
     }
     if args.len() < 2 || args[0] != "render" {
-        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--wires 0..1] [--wire-tune HZ] [--wire-decay S] [--wire-throw 0..1] [--root-weight 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
+        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--wires 0..1] [--wire-tune HZ] [--wire-decay S] [--wire-throw 0..1] [--root-weight 0..1] [--net 0..1] [--net-density 0..1] [--net-tension 0..1] [--net-tune HZ] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
     let out_path = &args[1];
     let mut p = EngineParams::default();
@@ -145,6 +145,11 @@ fn main() {
             "--wire-decay" => p.wire_decay = val(), // seconds, T60
             "--wire-throw" => p.wire_throw = val(),
             "--root-weight" => p.root_weight = val(),
+            // M13 — the fittings network (Net1 rattling interconnections)
+            "--net" => p.net = val(),
+            "--net-density" => p.net_density = val(),
+            "--net-tension" => p.net_tension = val(),
+            "--net-tune" => p.net_tune = val(), // Hz, fitting family base
             "--exciter" => {
                 i += 1;
                 p.exciter = match args.get(i).map(|s| s.as_str()) {
@@ -251,7 +256,7 @@ fn main() {
     w.finalize().unwrap();
     let (cl, cr) = engine.contacts_lr();
     eprintln!(
-        "clg: {} samples ({:.2} s), {} modes, {} contact-samples (L {} / R {}), {} entries, peak {:.3} -> {}",
+        "clg: {} samples ({:.2} s), {} modes, {} contact-samples (L {} / R {}), {} entries, {} net-entries, peak {:.3} -> {}",
         buf_l.len(),
         buf_l.len() as f32 / sr,
         engine.n_modes(),
@@ -259,6 +264,7 @@ fn main() {
         cl,
         cr,
         engine.entries(),
+        engine.net_entries(),
         peak,
         out_path
     );
@@ -448,6 +454,12 @@ fn bench(args: &[String]) {
     let mut q = p;
     q.n_axial = 12; // 144-mode bank: the dense-transect stress case
     cases.push(("+ modes 144", q));
+    let mut q = p;
+    q.net = 1.0; // M13: full chain, tight tension — the net stress case
+    q.net_density = 1.0;
+    q.net_tension = 0.9;
+    q.net_tune = 1100.0;
+    cases.push(("+ net 1.0", q));
     for (name, cp) in &cases {
         let r = bench_case(cp, 1, sr, 4.0);
         report(name, &r);
@@ -595,6 +607,13 @@ fn hunt_config(rng: &mut Rng) -> (EngineParams, u32) {
     p.wire_decay = rng.range(0.15, 1.2);
     p.wire_throw = rng.f();
     p.root_weight = rng.f();
+    // M13 — the fittings network joins the hunt space
+    if rng.chance(0.6) {
+        p.net = rng.range(0.3, 1.0);
+        p.net_density = rng.f();
+        p.net_tension = rng.f();
+        p.net_tune = rng.log_range(300.0, 4000.0);
+    }
     p.decohere = rng.f();
     p.stereo_floor = rng.f();
     p.mode_spread = rng.f();
@@ -633,7 +652,8 @@ fn repro_line(p: &EngineParams, sat_kind: u32, tag: &str) -> String {
 --bed-release {:.3} --bed-source {:.3} --bed-comb {:.3} --bed-bright {:.3} \
 --cavity {:.3} --cavity-tune {:.2} --head2-tune {:.2} --head2-damp {:.3} \
 --wires {:.3} --wire-tune {:.1} --wire-decay {:.3} --wire-throw {:.3} \
---root-weight {:.3} --decohere {:.3} --stereo-floor {:.3} \
+--root-weight {:.3} --net {:.3} --net-density {:.3} --net-tension {:.3} \
+--net-tune {:.1} --decohere {:.3} --stereo-floor {:.3} \
 --mode-spread {:.3} --damp-asym {:.3} --sub-rotate {:.3} \
 --ex-color {:.3} --ex-time {:.3} --dur 4",
         p.f0, p.velocity, p.position, p.listen_pos, p.stiffness,
@@ -646,7 +666,8 @@ fn repro_line(p: &EngineParams, sat_kind: u32, tag: &str) -> String {
         p.bed_release, p.bed_source, p.bed_comb, p.bed_bright,
         p.cavity, p.cavity_tune.max(40.0), p.head2_tune, p.head2_damp,
         p.wires, p.wire_tune, p.wire_decay, p.wire_throw,
-        p.root_weight, p.decohere, p.stereo_floor,
+        p.root_weight, p.net, p.net_density, p.net_tension,
+        p.net_tune.max(300.0), p.decohere, p.stereo_floor,
         p.mode_spread, p.damp_asym, p.sub_rotate,
         p.ex_color, p.ex_time,
     )
@@ -657,6 +678,7 @@ fn hunt(n: u64, seed: u64) {
     let total_samples = (sr * 4.0) as usize;
     let tail_samples = (sr * 0.5) as usize;
     let mut flagged = 0u64;
+    let mut immortal = 0u64;
     for idx in 0..n {
         let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ (idx + 1));
         // warm the rng (xorshift starts correlated on sparse seeds)
@@ -746,6 +768,43 @@ nonfinite {nonfinite}, retrig {retrig}",
         if retrig {
             println!("  B: {}", repro_line(&p2, sat_kind2, &format!("scream_{idx}_b")));
         }
+        // M13 — bounded-lifetime verification: a flagged (still-alive)
+        // config must now DIE by its watchdog ceiling. IMMORTAL here is
+        // a watchdog bug — the class is supposed to be extinct. The
+        // horizon accounts for the retrigger offset (a retriggered
+        // voice's clock starts 0.5 s into the render) + the 250 ms
+        // fade + margin — the first horizon didn't, and minted four
+        // phantom immortals from ordinary retrig kills.
+        let ceil = engine.lifetime_ceiling();
+        let offset = if retrigged { 0.5 } else { 0.0 };
+        let cap2 = ((ceil + offset + 0.5) * sr) as usize;
+        let mut extra = done;
+        let mut died_at: Option<f32> = None;
+        while extra < cap2 {
+            let live2 = engine.process(&mut bl, &mut br);
+            extra += bl.len();
+            if !live2 {
+                died_at = Some(extra as f32 / sr);
+                break;
+            }
+        }
+        match died_at {
+            Some(t) => println!(
+                "  lifetime: DIES at {t:.2} s (ceiling {ceil:.2} s{}, by {})",
+                if retrigged { " + 0.5 s retrig offset" } else { "" },
+                if engine.watchdog_kills() > 0 {
+                    "WATCHDOG"
+                } else {
+                    "natural decay/sleep"
+                }
+            ),
+            None => {
+                immortal += 1;
+                println!("  lifetime: IMMORTAL past ceiling {ceil:.2} s — WATCHDOG BUG");
+            }
+        }
     }
-    println!("hunt: {n} configs, {flagged} flagged (seed {seed})");
+    println!(
+        "hunt: {n} configs, {flagged} flagged, {immortal} immortal (seed {seed})"
+    );
 }

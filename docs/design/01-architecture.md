@@ -379,6 +379,26 @@ becomes canonical. First batches:
   (0.15–1.5 s log, follow folded in). Params 48–52. Net1
   *bar-rescue* (satellite chains between satellites) remains
   unbuilt — M12+ if the bar still matters.
+- **M13** — watchdog + the fittings network (BUILT 2026-07-23, one
+  round, Sam's green light): (1) **the lifetime watchdog** — a voice
+  must DIE: patch-derived ceiling max(4 s, 2.25 × the longest active
+  T60, cap 30 s), 250 ms fade, dead latch; kills the quiet-immortal-
+  floor class (Sam: pounds of downstream compression make a −60 dB
+  floor audible; also a CPU leak since such voices never sleep).
+  Bit-exact on every healthy render (null matrix −inf ×7 incl. a
+  14 s gong); 12k-config hostile sweep: zero immortals, six genuine
+  watchdog kills observed in the wild. (2) **the fittings network**
+  (Net1 rattling interconnections proper — the bar rescue): a
+  feed-forward CHAIN of 2–8 small hardware resonators, each in
+  unilateral floored-gap rattling contact with the element before it
+  (body → fitting 0 → fitting 1 → …); per-link normalized frames,
+  M11 feed² law, entry-rate fuses, M12.1 contact-ω clamp; ZERO
+  reaction paths (no new feedback loops by construction — the v1
+  decision, revisit if listening demands bidirectional). Works on
+  all archetypes; bar is the showcase (a bare bar is a Corpus patch;
+  a bar with clattering hardware is not). Params 53–56 (Net / Net
+  Density / Net Tension / Net Tune). Band-limit −79 dB above
+  0.45·sr at the maximal corner.
 - **M-panel** — DEFERRED (2026-07-22): the panel waits on Sam's
   separate design-system effort (shared visual language for the
   sister plugins); re-enters the roadmap on his call. Interaction

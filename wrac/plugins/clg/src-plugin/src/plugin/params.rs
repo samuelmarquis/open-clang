@@ -77,6 +77,14 @@ pub(crate) const PARAM_WIRE_TUNE_ID: u32 = 49;
 pub(crate) const PARAM_WIRE_DECAY_ID: u32 = 50;
 pub(crate) const PARAM_WIRE_THROW_ID: u32 = 51;
 pub(crate) const PARAM_ROOT_WEIGHT_ID: u32 = 52;
+// M13 — the fittings network (Net1 rattling interconnections; the bar
+// rescue — one batched drop, 2026-07-23). Also in this round, no id
+// change: the lifetime watchdog (engine-internal; a voice must DIE —
+// ceiling = max(4 s, 2.25 × the patch's longest T60), 250 ms fade).
+pub(crate) const PARAM_NET_ID: u32 = 53;
+pub(crate) const PARAM_NET_DENSITY_ID: u32 = 54;
+pub(crate) const PARAM_NET_TENSION_ID: u32 = 55;
+pub(crate) const PARAM_NET_TUNE_ID: u32 = 56;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -282,6 +290,17 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_WIRE_DECAY_ID, "Wire Decay", 0.15, 1.2, 0.45, Format::Seconds),
     continuous(PARAM_WIRE_THROW_ID, "Wire Throw", 0.0, 1.0, 0.5, Format::Percent),
     continuous(PARAM_ROOT_WEIGHT_ID, "Root Weight", 0.0, 1.0, 0.0, Format::Percent),
+    // M13 — the fittings network (Net1 rattling interconnections):
+    // a feed-forward CHAIN of small hardware resonators in unilateral
+    // rattling contact — body shakes fitting 0, fitting 0 shakes
+    // fitting 1, … Buzzy intermittent energy transfer, never polite.
+    // The bar rescue (Batch 001: "sounds like stock ableton Corpus" —
+    // a bare bar is exactly a Corpus patch; a bar with clattering
+    // hardware is not). Net 0 = fully off, bit-exact.
+    continuous(PARAM_NET_ID, "Net", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_NET_DENSITY_ID, "Net Density", 0.0, 1.0, 0.5, Format::Percent),
+    continuous(PARAM_NET_TENSION_ID, "Net Tension", 0.0, 1.0, 0.5, Format::Percent),
+    continuous(PARAM_NET_TUNE_ID, "Net Tune", 300.0, 4000.0, 1100.0, Format::Hertz),
 ];
 
 /// The single source of truth for the parameter-store size. The

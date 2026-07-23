@@ -95,19 +95,28 @@ and `PATHS-NOT-TAKEN.md`.
   two candidates (reaction LP, restitution exit guard) were
   correctly rejected by it; cures must be zero-effect until the
   pathology discriminator trips. (M12.1.)
+- **A voice must DIE — bound lifetime by construction** (Sam's law,
+  M13): downstream compression makes ANY immortal floor audible, and
+  a never-sleeping voice is a CPU leak. The lifetime watchdog:
+  patch-derived ceiling max(4 s, 2.25 × longest active T60, cap
+  30 s), 250 ms fade, dead latch. Don't chase each quiet pump —
+  bound the time, like bounding the geometry. Corollary for
+  verification tooling: measurement horizons must account for event
+  offsets (a retrigger-offset blind spot minted four phantom
+  IMMORTAL verdicts before it was caught).
 
-## Current state (2026-07-24)
+## Current state (2026-07-23)
 
 Instrument installed (CLAP/VST3/AU, `aumu`/`Clg1`/`Oclg`,
-RELEASE-profile, hash-verified), params 0–52 dense, engine =
+RELEASE-profile, hash-verified), params 0–56 dense, engine =
 `rt/engine` (canonical since M3 parity; Python `lab/` frozen). M11
-(wire bank Net1, crack-as-throw, Root Weight) built and battery-
-gated; snare verdict "pretty good," voicing settled low (f0 ≤ 155,
-out/snare-v3b). M12 perf round done: debug-install root cause fixed,
-engine 1.36× faster, 8-voice worst block 11.7 % budget. Queued:
-Net1 rattling interconnections (bar-rescue, deferred from M10/M11).
-Deferred: panel (waits on Sam's external design system; drawable
-graph lanes incl. decay-law curve), Alignment articulator
-(post-panel), effect mode (sidechain vs separate plugin, undecided),
-presets (Sam's friends, post-panel), MPE/choke (designed,
-post-panel).
+wire bank battery-gated; snare "pretty good," voicing settled low
+(f0 ≤ 155, out/snare-v3b). M12 perf (debug-install fixed, worst
+block ~12–14 %), M12.1 scream killed, M13 watchdog (immortal floors
+extinct, 12k-config sweep) + fittings network (Net1 params 53–56,
+bar-rescue bet, out/net-v1 verdict pending). Queued: M11 asks 2–7,
+M12 underrun retest. Deferred: panel (waits on Sam's external design
+system; drawable graph lanes incl. decay-law curve), Alignment
+articulator (post-panel), effect mode (sidechain vs separate plugin,
+undecided — PROVENANCE patent gate first), presets (Sam's friends,
+post-panel), MPE/choke (designed, post-panel).

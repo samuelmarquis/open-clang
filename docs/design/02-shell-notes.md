@@ -467,3 +467,64 @@ all six patches; shell 6/6; qc.zsh full pass (validator 18/18
 0-warn, auval OK, bench 12.7 % worst block). Known remainder:
 ~1/1000 hostile configs settle into quiet (−45..−80 dB) immortal
 LF floors — CPU-leak class, not audible-pain class; future round.
+
+## M13 — watchdog + the fittings network (2026-07-23)
+
+Combined round on Sam's green light: (A) the quiet-immortal-floor
+kill, (B) Net1 rattling interconnections (the bar rescue).
+
+**ABI**: params 53–56, dense — Net (%, def 0, bit-exact off), Net
+Density (%, def 0.5, chain length 2–8 fittings), Net Tension (%,
+def 0.5, loose-slappy ↔ tight-buzzy: gaps 0.3–0.7 → 0.05–0.12 +
+return springs 40 → 400 Hz), Net Tune (300–4000 Hz, def 1100,
+fitting family base ±0.8 oct salted, partials capped 0.42·sr).
+PARAM_COUNT 57; density test passes. No other id changes.
+
+**The fittings network**: feed-forward chain (body net-volume tap →
+fitting 0 → fitting 1 → …), each link a unilateral floored-gap
+(0.05, the M8 law) contact in its own normalized frame (running
+support peak), entry loudness = approach speed (M8) × feed² (M11:
+contact energy rides the support's real envelope — the clatter dies
+with its source), per-link entry-rate fuse (M12.1 thresholds),
+contact ω under the 0.5·sr clamp, radiation through the 2×10 kHz
+smoother, own running-peak normalizer, mixed vs the bank peak
+(dust_peak tracked before the join — normalizer law). Fitting
+voices: 3 inharmonic hardware partials, T60 0.05–0.18 s ×
+ratio^−0.7. NO reaction paths at all (v1): zero new feedback
+loops by construction. Stereo: per-fitting equal-power pan salt,
+engaged only when the voice is stereo (mono channels stay
+bit-identical). Band-limit at the maximal corner (tension 1, tune
+4000, buckling color 1): **−79.2 dB @44.1k / −79.6 @48k** above
+0.45·sr.
+
+**The lifetime watchdog**: ceiling = max(4 s, 2.25 × longest active
+T60 among modes (post-brace/bonus), satellites, wires ×1.25 salt,
+cavity/head2 (0.56 s), bed perceived-T60), capped 30 s; latched at
+trigger like every param read. Past the ceiling: 250 ms fade →
+dead LATCH (output stays zero regardless of block size) → inactive,
+state cleared, CPU released. `lifetime_ceiling()`,
+`watchdog_kills()`, `net_entries()` exposed. The loud airbag
+(M12.1, 4 s/5 %/10 ms) is untouched and takes precedence.
+
+**Gates**: engine decay_gate 7/7 (new: net_heavy at both tension
+extremes; long-gong t60 4 s — ceiling 17+ s, dies by natural sleep,
+zero watchdog kills; floor specimen idx299 bounded; white-box
+watchdog kill-path proof: arm → fade → dead latch, exactly once).
+Shell 7/7 (new host-path gate `net_reaches_engine_and_decays`, both
+tension extremes, zero airbag/watchdog on healthy). Null matrix
+**bit-exact (−inf) ×7** (v3/wood/sats/casc/buck/dust + 14 s gong).
+Autopsy battery on v3: 12.5 dB dominance @191, rise 2.86 ms, 19
+ring peaks — unchanged. 12k-config 3-seed hostile hunt (net params
+in the hunt space now): **0 immortal** — every flagged config dies
+≤ ceiling(+retrig offset), 6 by WATCHDOG, rest by natural decay.
+qc.zsh full pass: install 12/12 hash-verified, clap-validator 18/18
+0 warnings, auval SUCCEEDED, bench full-x8 worst block 12.3–14.2 %
+(one 84 % outlier observed under validator load — scheduling, not
+DSP; mean 1494–1503 ns/frame vs 1430 pre-round, +4.7 % = the
+watchdog/fuse branches).
+
+**Hunt fix (honest)**: the first bounded-lifetime verification
+horizon ignored the 0.5 s retrigger offset and minted four phantom
+IMMORTAL verdicts from ordinary retrig kills — corrected (horizon =
+ceiling + offset + fade + margin; kill mechanism now printed).
+Measurement horizons must account for event offsets.

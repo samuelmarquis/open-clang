@@ -26,6 +26,7 @@ use crate::plugin::{
     PARAM_CAVITY_ID, PARAM_CAVITY_TUNE_ID, PARAM_HEAD2_TUNE_ID, PARAM_HEAD2_DAMP_ID,
     PARAM_WIRES_ID, PARAM_WIRE_TUNE_ID, PARAM_WIRE_DECAY_ID, PARAM_WIRE_THROW_ID,
     PARAM_ROOT_WEIGHT_ID,
+    PARAM_NET_ID, PARAM_NET_DENSITY_ID, PARAM_NET_TENSION_ID, PARAM_NET_TUNE_ID,
     param_clamp,
     param_default, param_exists,
 };
@@ -210,6 +211,10 @@ impl SharedState {
             wire_decay: self.v(PARAM_WIRE_DECAY_ID),
             wire_throw: self.v(PARAM_WIRE_THROW_ID),
             root_weight: self.v(PARAM_ROOT_WEIGHT_ID),
+            net: self.v(PARAM_NET_ID),
+            net_density: self.v(PARAM_NET_DENSITY_ID),
+            net_tension: self.v(PARAM_NET_TENSION_ID),
+            net_tune: self.v(PARAM_NET_TUNE_ID),
             ..EngineParams::default()
         };
         apply_brace_macro(&mut p, self.v(PARAM_BRACE_ID));
@@ -382,6 +387,53 @@ mod tests {
             assert!(
                 tail < head * 0.01,
                 "wire limit cycle (cavity {cav}): head {head} tail {tail}"
+            );
+            assert!(on.iter().all(|x| x.is_finite()));
+        }
+    }
+
+    /// M13 gate: the fittings network must (a) be audible through the
+    /// host path (bar showcase — the whole point of the round), and
+    /// (b) DECAY — new contact machinery answers to the decay gate
+    /// before anything else (the M12.1 standing lesson).
+    #[test]
+    fn net_reaches_engine_and_decays() {
+        let sr = 44100.0f32;
+        let render = |net: f32, tension: f32| -> Vec<f32> {
+            let s = SharedState::new();
+            s.set_parameter_value(PARAM_ARCH_ID, 2.0).unwrap(); // Bar
+            s.set_parameter_value(PARAM_NET_ID, net as f64).unwrap();
+            s.set_parameter_value(PARAM_NET_DENSITY_ID, 1.0).unwrap();
+            s.set_parameter_value(PARAM_NET_TENSION_ID, tension as f64).unwrap();
+            let p = s.engine_params_for_note(60, 0.95);
+            assert!((p.net - net).abs() < 1e-6, "net lost: {}", p.net);
+            let mut e = clg_engine::Engine::new(sr);
+            e.trigger(&p);
+            let mut out = vec![0.0f32; (sr * 6.0) as usize];
+            let mut r = [0.0f32; 256];
+            for c in out.chunks_mut(256) {
+                let n = c.len();
+                e.process(c, &mut r[..n]);
+            }
+            assert_eq!(e.airbag_trips(), 0);
+            assert_eq!(e.watchdog_kills(), 0, "watchdog on a healthy net patch");
+            out
+        };
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        for tension in [0.1f32, 0.9] {
+            let off = render(0.0, tension);
+            let on = render(1.0, tension);
+            let d: Vec<f32> = on.iter().zip(&off).map(|(a, b)| a - b).collect();
+            assert!(
+                rms(&d) > rms(&off) * 0.01,
+                "net 1.0 inaudible through the host path (tension {tension})"
+            );
+            let n5 = (sr * 0.5) as usize;
+            let head = rms(&on[..n5]);
+            let tail = rms(&on[on.len() - n5..]);
+            assert!(
+                tail < head * 0.01,
+                "net limit cycle (tension {tension}): head {head} tail {tail}"
             );
             assert!(on.iter().all(|x| x.is_finite()));
         }
