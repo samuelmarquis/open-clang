@@ -12,6 +12,7 @@
 
 pub const MAX_MODES: usize = 256;
 pub const MAX_SATS: usize = 4;
+pub const SAT_PARTIALS: usize = 4; // M8: partials per satellite (multi-modal)
 pub const CTRL_INTERVAL: usize = 32; // samples between coefficient updates
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,13 +68,38 @@ pub struct EngineParams {
     pub brace_tension: f32,  // pitch-up fraction at full brace (macro feeds this)
     pub brace_t60: f32,      // overall T60 scale (1 = neutral)
     pub brace_low_bonus: f32, // 0..1: low-mode ring bonus (unbraced body keeps the blow)
-    // NL2 — contact satellites (M3.2 port of lab/nl2.py)
+    // NL2 — contact satellites (M3.2 port of lab/nl2.py; M8 redesign)
     pub sat_count: u32,
     pub sat_fs: [f32; MAX_SATS],
     pub sat_t60: [f32; MAX_SATS],
     pub sat_seat: [f32; MAX_SATS],
     pub sat_rest: [f32; MAX_SATS], // hover gap, fraction of est. peak seat displacement
     pub sat_level: [f32; MAX_SATS],
+    // M8 — multi-modal satellites: each satellite radiates a small modal
+    // OBJECT (up to SAT_PARTIALS partials rung by contact), not a sine.
+    // ratio 0.0 = unused slot. Partial decay derives from sat_t60 scaled
+    // by ratio^-0.7 (higher partials die faster).
+    pub sat_pr: [[f32; SAT_PARTIALS]; MAX_SATS], // partial freq ratios
+    pub sat_pa: [[f32; SAT_PARTIALS]; MAX_SATS], // partial amplitudes
+    // M8 — the rattle control surface (one batched drop, params 33-39)
+    /// 0..1 — contact shocks pump the cascade receiver rings through their
+    /// OWN drive path (collision-clang works with cascade_amt at 0).
+    pub rattle_casc: f32,
+    /// 0..1 — regime axis: 0 = pressed (legacy spring), 1 = thrown-and-
+    /// settling (gravity + restitution < 1: geometric settle chatter).
+    pub bounce: f32,
+    /// 0..1 — static gap scale (0.5 = preset-neutral): tight buzz <-> loose.
+    pub rattle_gap: f32,
+    /// 0..1 — velocity->gap depth: 0 = static, 1 = fully velocity-affected
+    /// (harder hit = thrown wider). Sam's addition to the M8 surface.
+    pub gap_vel: f32,
+    /// satellite retune in OCTAVES (±2), applied to all partials + contact ω.
+    pub rattle_tune: f32,
+    /// 0..1 — keytrack blend: 0 = fixed Hz, 1 = full note tracking (ref 36 Hz).
+    pub rattle_track: f32,
+    /// 0..1 — seat migration through the decay (per-channel salted: free
+    /// rattle decorrelation whenever walk > 0).
+    pub walk: f32,
     // NL2 — the dust layer (statistical micro-contacts; Batch 003 verdict)
     pub dust_level: f32,
     pub dust_thr_db: f32,
@@ -147,6 +173,15 @@ impl Default for EngineParams {
             sat_seat: [0.3; MAX_SATS],
             sat_rest: [0.2; MAX_SATS],
             sat_level: [1.0; MAX_SATS],
+            sat_pr: [[1.0, 0.0, 0.0, 0.0]; MAX_SATS], // single partial = legacy voice
+            sat_pa: [[1.0, 0.0, 0.0, 0.0]; MAX_SATS],
+            rattle_casc: 0.0,
+            bounce: 0.0,
+            rattle_gap: 0.5,
+            gap_vel: 0.0,
+            rattle_tune: 0.0,
+            rattle_track: 0.0,
+            walk: 0.0,
             dust_level: 0.0,
             dust_thr_db: -40.0,
             dust_follow: 1.0,
@@ -181,8 +216,10 @@ struct Mode {
     v: f32,
     low: bool,     // below cascade split (donor) — else receiver
     inj: f32,      // cascade injection gain (receivers)
+    inj_rc: f32,   // M8: rattle->cascade shock gain (receivers; own path)
     // coherent-cascade shadow state: kicked at trigger, rings freely,
-    // contributes u2 * buildup * e_norm (receivers only)
+    // contributes u2 * buildup * e_norm (receivers only). M8: also the
+    // collision-clang rings — contact-entry shocks kick these states.
     u2: f32,
     v2: f32,
     mi: f32, // mode indices (bar: mi = partial number, ni = 1)
@@ -238,6 +275,7 @@ pub struct Engine {
     sat_gain: f32,  // mix ratio of normalized rattle vs bank peak
     sat_peak: f32,  // running peak of raw satellite radiation (normalizer)
     contacts: u32,
+    entries: u32, // contact-ENTRY events, L+R (QC: pressed vs bouncing)
     // STEREO round 2: R-channel satellite bank (per-ear contact events).
     // Engaged only when the engine is stereo; otherwise the L bank feeds
     // both channels (bit-identity at defaults).
@@ -246,11 +284,47 @@ pub struct Engine {
     sat_speak_r: [f32; MAX_SATS],
     sat_peak_r: f32,
     contacts_r: u32,
+    // M8 — multi-modal satellite voices: partial rotors (coupled-form),
+    // rung by contact impulses, per channel. Coefficients shared L/R.
+    sat_pu: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_pv: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_pu_r: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_pv_r: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_pcw: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_psw: [[f32; SAT_PARTIALS]; MAX_SATS],
+    sat_prr: [[f32; SAT_PARTIALS]; MAX_SATS], // per-partial damping
+    sat_pamp: [[f32; SAT_PARTIALS]; MAX_SATS], // per-partial radiated amp
+    // M8 — bounce/settle + gap laws
+    sat_incontact: [bool; MAX_SATS],
+    sat_incontact_r: [bool; MAX_SATS],
+    sat_sdp: [f32; MAX_SATS],   // previous seat displacement (surface velocity)
+    sat_sdp_r: [f32; MAX_SATS],
+    sat_sdvp: [f32; MAX_SATS],  // previous surface velocity (surface accel)
+    sat_sdvp_r: [f32; MAX_SATS],
+    sat_carried: [bool; MAX_SATS], // bounce path: riding the surface (hops when
+    sat_carried_r: [bool; MAX_SATS], // the table drops faster than gravity)
+    sat_rest0: [f32; MAX_SATS],    // note-on gap (static x velocity laws)
+    sat_rest_eff: [f32; MAX_SATS], // ctrl-rate: rest0 x decay-tightening
+    sat_grav: f32,                 // gravity accel (normalized units), bounce path
+    // M8 — rattle->cascade coupling
+    rc_shock: f32,   // this-sample contact-entry shock (L+R summed, pre-mode-loop)
+    // M8 — walk: drifting seats (R gets its own weights when walking)
+    sat_w_r: [[f32; MAX_MODES]; MAX_SATS],
+    walk_on: bool,
     // dust
     dust_env: f32,   // one-pole envelope of |y|
     dust_peak: f32,  // running peak of bank |y| (shared normalizer)
     dust_lp1: f32,   // crude bandpass: HP(lp1) then LP(lp2) states
     dust_lp2: f32,
+    // M8 — satellite radiation smoother (2x one-pole @10 kHz): bounce-mode
+    // entry clicks are hard steps into the partial rotors; the doctrine's
+    // band-limit gate demands softened edges (same lesson as buckling's
+    // third filter stage)
+    sat_rad_lp1: f32,
+    sat_rad_lp2: f32,
+    sat_rad_lp1r: f32,
+    sat_rad_lp2r: f32,
+    a_rad: f32,
     // sample-rate-correct coefficients (M6 pass; formerly 44.1k literals)
     a_env: f32, // dust envelope one-pole, tau 4 ms
     a_hp: f32,  // dust bandpass HP corner 1.5 kHz
@@ -278,6 +352,7 @@ impl Engine {
         // M6 sample-rate pass: these were 44.1k-hardcoded literals
         // (0.9943 / 0.807 / 0.396 / 0.9); now derived, matching the old
         // values at 44.1k to 4 decimals.
+        let a_rad = (-2.0 * core::f32::consts::PI * 10_000.0 / sr).exp();
         let a_env = (-1.0 / (0.004 * sr)).exp();
         let a_hp = (-2.0 * core::f32::consts::PI * 1500.0 / sr).exp();
         let a_lp = (-2.0 * core::f32::consts::PI * 6500.0 / sr).exp();
@@ -311,15 +386,43 @@ impl Engine {
             sat_gain: 0.0,
             sat_peak: 0.0,
             contacts: 0,
+            entries: 0,
             sat_z_r: [0.0; MAX_SATS],
             sat_v_r: [0.0; MAX_SATS],
             sat_speak_r: [0.0; MAX_SATS],
             sat_peak_r: 0.0,
             contacts_r: 0,
+            sat_pu: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_pv: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_pu_r: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_pv_r: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_pcw: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_psw: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_prr: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_pamp: [[0.0; SAT_PARTIALS]; MAX_SATS],
+            sat_incontact: [false; MAX_SATS],
+            sat_incontact_r: [false; MAX_SATS],
+            sat_sdp: [0.0; MAX_SATS],
+            sat_sdp_r: [0.0; MAX_SATS],
+            sat_sdvp: [0.0; MAX_SATS],
+            sat_sdvp_r: [0.0; MAX_SATS],
+            sat_carried: [false; MAX_SATS],
+            sat_carried_r: [false; MAX_SATS],
+            sat_rest0: [0.0; MAX_SATS],
+            sat_rest_eff: [0.0; MAX_SATS],
+            sat_grav: 0.0,
+            rc_shock: 0.0,
+            sat_w_r: [[0.0; MAX_MODES]; MAX_SATS],
+            walk_on: false,
             dust_env: 0.0,
             dust_peak: 0.0,
             dust_lp1: 0.0,
             dust_lp2: 0.0,
+            sat_rad_lp1: 0.0,
+            sat_rad_lp2: 0.0,
+            sat_rad_lp1r: 0.0,
+            sat_rad_lp2r: 0.0,
+            a_rad,
             a_env,
             a_hp,
             a_lp,
@@ -350,6 +453,12 @@ impl Engine {
     /// Per-channel contact-samples (stereo round 2 QC).
     pub fn contacts_lr(&self) -> (u32, u32) {
         (self.contacts, self.contacts_r)
+    }
+
+    /// Contact-ENTRY events (M8 QC: many brief entries = bouncing/chatter,
+    /// few long contacts = pressed).
+    pub fn entries(&self) -> u32 {
+        self.entries
     }
 
     pub fn latency_samples(&self) -> usize {
@@ -493,12 +602,15 @@ impl Engine {
             0.0
         };
         let inj = p.cascade_amt * p.velocity * p.velocity * med_low * 0.6;
+        // M8: rattle->cascade shock gain — its OWN path (velocity enters via
+        // contact strength; kicks are scaled ONLINE by the bank running peak
+        // in the process loop — analytic units cannot reach ring-state scale,
+        // the M3.2 normalization lesson)
+        let inj_rc = p.rattle_casc.clamp(0.0, 1.0) * 0.5;
         for (k, m) in self.modes[..self.n_modes].iter_mut().enumerate() {
-            m.inj = if m.low {
-                0.0
-            } else {
-                inj * (m.freq / p.f0).powf(-0.3)
-            };
+            let ratio_w = (m.freq / p.f0).powf(-0.3);
+            m.inj = if m.low { 0.0 } else { inj * ratio_w };
+            m.inj_rc = if m.low { 0.0 } else { inj_rc * ratio_w };
             // coherent cascade: arm each shadow ring with a PER-MODE PHASE
             // (golden-ratio salt). Quadrature init alone was insufficient —
             // ~100 phase-ALIGNED rising sines sum to a coherent LF ramp,
@@ -610,7 +722,24 @@ impl Engine {
         // at the seat — constant tuned against lab contact counts).
         self.n_sats = (p.sat_count as usize).min(MAX_SATS);
         self.contacts = 0;
+        self.entries = 0;
         let nm = self.n_modes;
+        // M8 — tune/track: one frequency scale for the whole rattle family
+        // (partials AND contact dynamics — the hardware's timescale follows
+        // its size). track ref = 36 Hz so defaults keep the f36-kick pitch.
+        let tr = p.rattle_track.clamp(0.0, 1.0);
+        let fscale = (2.0f32).powf(p.rattle_tune.clamp(-2.0, 2.0))
+            * (p.f0 / 36.0).max(1e-3).powf(tr);
+        // M8 — gap laws at note-on: static base (0.5 = preset-neutral) x
+        // velocity depth (gap_vel 0 = static; 1 = fully velocity-affected,
+        // harder = thrown wider). Decay-tightening rides e_norm at ctrl rate.
+        let gv = p.gap_vel.clamp(0.0, 1.0);
+        let gap_note = (2.0 * p.rattle_gap.clamp(0.0, 1.0))
+            * ((1.0 - gv) + gv * 2.0 * p.velocity);
+        let b = p.bounce.clamp(0.0, 1.0);
+        // gravity for the bounce path (normalized units): tuned so full-
+        // velocity throws land first flights ~40-90 ms — musical settle.
+        self.sat_grav = 60.0 + 240.0 * b;
         for j in 0..self.n_sats {
             let seat = p.sat_seat[j];
             let sx = 0.08 + 0.42 * seat;
@@ -626,23 +755,71 @@ impl Engine {
                         + 0.01,
                 };
                 self.sat_w[j][k] = w;
+                self.sat_w_r[j][k] = w; // walk diverges these at ctrl rate
                 // peak response estimate: amp x pulse-length x resonant gain
                 est += w * self.modes[k].amp;
             }
             // analytic estimate now only SEEDS the online tracker (low, so
             // the true peak takes over within the first oscillation)
-            let est_peak = est * p.velocity * self.pulse_len as f32 * 0.25;
+            let est_peak = est * p.velocity * self.pulse_len.max(64) as f32 * 0.25;
             self.sat_speak[j] = (est_peak * 0.3).max(1e-9);
-            self.sat_z[j] = p.sat_rest[j]; // normalized coordinates
-            self.sat_v[j] = 0.0;
-            self.sat_om[j] = 2.0 * core::f32::consts::PI * p.sat_fs[j];
+            // gap floor 0.05: below ~5% of seat peak the contact duty cycle
+            // approaches 100% and the one-sample-delayed unilateral reaction
+            // becomes a parametric PUMP that keeps the bank alive forever
+            // (the M8 no-drone diagnosis) — the floor keeps that regime
+            // unreachable while every preset gap stays untouched
+            let rest0 = (p.sat_rest[j] * gap_note).max(0.05);
+            self.sat_rest0[j] = rest0;
+            self.sat_rest_eff[j] = rest0;
+            self.sat_z[j] = rest0;
+            // M8 — velocity throw: a hard hit scatters the hardware upward
+            // immediately (bounce-scaled); the settle brings it home.
+            self.sat_v[j] = b * p.velocity * 14.0 * rest0.max(0.05);
+            // symplectic-Euler stability: ω·dt < 2 — clamp to 0.3·2π·sr
+            // (fuzzed Tune x Track x f0 extremes can otherwise blow past it
+            // and NaN the contact integrator: the M8 validator-hang lesson)
+            self.sat_om[j] = (2.0 * core::f32::consts::PI * p.sat_fs[j] * fscale)
+                .clamp(20.0, 1.885 * self.sr);
             self.sat_ze[j] = 6.9078 / (p.sat_t60[j].max(1e-3) * self.sat_om[j]);
             // contact kick gain in NORMALIZED units: a full-depth contact
             // (pen ~ rest) rings the satellite at ~1/3 of its gap scale.
             // Unclamped — pen is geometrically bounded (sd_n <= 1), so force
             // is bounded and potential-derived: no clamp, no limit cycle.
             self.sat_kc[j] = 0.05 * self.sat_om[j] * self.sat_om[j];
+            self.sat_incontact[j] = false;
+            self.sat_incontact_r[j] = false;
+            self.sat_sdp[j] = 0.0;
+            self.sat_sdp_r[j] = 0.0;
+            self.sat_sdvp[j] = 0.0;
+            self.sat_sdvp_r[j] = 0.0;
+            self.sat_carried[j] = false;
+            self.sat_carried_r[j] = false;
+            // M8 — multi-modal voice: partial rotors (coupled-form), rung by
+            // contact impulses; decay ratio^-0.7 (higher partials die faster)
+            for q in 0..SAT_PARTIALS {
+                let ratio = p.sat_pr[j][q];
+                if ratio > 0.0 {
+                    let f = (p.sat_fs[j] * ratio * fscale).min(self.sr * 0.45);
+                    let w = 2.0 * core::f32::consts::PI * f / self.sr;
+                    self.sat_pcw[j][q] = w.cos();
+                    self.sat_psw[j][q] = w.sin();
+                    let t60p = p.sat_t60[j].max(1e-3) * ratio.powf(-0.7);
+                    self.sat_prr[j][q] = (-6.9078 / (t60p * self.sr)).exp();
+                    self.sat_pamp[j][q] = p.sat_pa[j][q];
+                } else {
+                    self.sat_pamp[j][q] = 0.0;
+                    self.sat_pcw[j][q] = 0.0;
+                    self.sat_psw[j][q] = 0.0;
+                    self.sat_prr[j][q] = 0.0;
+                }
+                self.sat_pu[j][q] = 0.0;
+                self.sat_pv[j][q] = 0.0;
+                self.sat_pu_r[j][q] = 0.0;
+                self.sat_pv_r[j][q] = 0.0;
+            }
         }
+        self.walk_on = p.walk > 0.0 && self.n_sats > 0;
+        self.rc_shock = 0.0;
         // rattle mix ratio: normalized-online radiation vs bank running peak
         // (the RT equivalent of the lab's offline normalize-then-mix-at-0.5);
         // exposed as Rattle Level (stereo round 2)
@@ -745,6 +922,52 @@ impl Engine {
                         + (self.glide_r2 - 1.0) * p.velocity * p.velocity * self.e_norm)
                         .sqrt();
                     self.update_coeffs(mult);
+                }
+                // M8 — gap decay-tightening (the snare-sizzle bloom: density
+                // rises as the body calms, then cuts off), bounce-scaled
+                let bt = p.bounce.clamp(0.0, 1.0);
+                for j in 0..self.n_sats {
+                    self.sat_rest_eff[j] =
+                        (self.sat_rest0[j] * (1.0 - 0.6 * bt * (1.0 - self.e_norm))).max(0.05);
+                }
+                // M8 — walk: seats migrate through the decay; per-channel
+                // phase salt => L/R weight sets diverge (free decorrelation)
+                if self.walk_on {
+                    let wk = p.walk.clamp(0.0, 1.0);
+                    let nm_w = self.n_modes;
+                    for j in 0..self.n_sats {
+                        let fw = 0.9 + 0.9 * ((j as f32 * PHI) % 1.0);
+                        let ph0 = 2.0 * core::f32::consts::PI * ((j as f32 * PHI * 3.0) % 1.0);
+                        let drift = 0.30 * wk;
+                        let om_w = 2.0 * core::f32::consts::PI * fw;
+                        let seat_l = (p.sat_seat[j]
+                            + drift * (om_w * self.t + ph0).sin())
+                        .clamp(0.0, 1.0);
+                        let seat_r = (p.sat_seat[j]
+                            + drift * (om_w * self.t + ph0 + 2.4).sin())
+                        .clamp(0.0, 1.0);
+                        for (seat, w_arr) in [(seat_l, 0usize), (seat_r, 1usize)] {
+                            let sx = 0.08 + 0.42 * seat;
+                            let sy = 0.06 + 0.38 * seat;
+                            for k in 0..nm_w {
+                                let m = &self.modes[k];
+                                let w = match p.arch {
+                                    Arch::Bar => {
+                                        (m.mi * core::f32::consts::PI * seat).cos().abs() + 0.05
+                                    }
+                                    _ => ((m.mi * core::f32::consts::PI * sx).sin()
+                                        * (m.ni * core::f32::consts::PI * sy).sin())
+                                    .abs()
+                                        + 0.01,
+                                };
+                                if w_arr == 0 {
+                                    self.sat_w[j][k] = w;
+                                } else {
+                                    self.sat_w_r[j][k] = w;
+                                }
+                            }
+                        }
+                    }
                 }
                 self.ctrl_count = CTRL_INTERVAL;
             }
@@ -878,6 +1101,9 @@ impl Engine {
             let mut sat_react_r = [0.0f32; MAX_SATS];
             let mut sat_radiate = 0.0f32;
             let mut sat_radiate_r = 0.0f32;
+            let b_snc = p.bounce.clamp(0.0, 1.0);
+            let restitution = 0.40 + 0.30 * b_snc; // strictly < 1: energy-honest
+            let mut shock = 0.0f32; // contact-ENTRY impulses (rattle->cascade)
             for j in 0..self.n_sats {
                 let mut sd = 0.0f32;
                 let mut sd_r = 0.0f32;
@@ -886,10 +1112,14 @@ impl Engine {
                     sd += self.sat_w[j][k] * m.u;
                     if stereo {
                         let (ru, rv) = if detuned_now { (m.ur, m.vr) } else { (m.u, m.v) };
-                        sd_r += self.sat_w[j][k] * (ru * m.ct + rv * m.st);
+                        sd_r += self.sat_w_r[j][k] * (ru * m.ct + rv * m.st);
                     }
                 }
-                // L bank
+                let om = self.sat_om[j];
+                let rest = self.sat_rest_eff[j];
+                // ---- L bank (M8 dynamics: spring blends out, gravity +
+                // restitution blend in as bounce rises; the settle is
+                // geometric because flight time ∝ v and v <- e·v per bounce)
                 self.sat_speak[j] = self.sat_speak[j].max(sd.abs());
                 let sd_n = sd / self.sat_speak[j];
                 let pen = (sd_n - self.sat_z[j]).clamp(0.0, 2.0);
@@ -899,15 +1129,95 @@ impl Engine {
                 } else {
                     0.0
                 };
-                let om = self.sat_om[j];
-                let acc = -om * om * (self.sat_z[j] - p.sat_rest[j])
-                    - 2.0 * self.sat_ze[j] * om * self.sat_v[j]
-                    + self.sat_kc[j] * f_n;
-                self.sat_v[j] += dt * acc;
-                self.sat_z[j] += dt * self.sat_v[j];
-                sat_react[j] = 0.15 * f_n;
-                sat_radiate += p.sat_level[j] * self.sat_v[j] / om;
-                // R bank (stereo only)
+                let sdv_raw = (sd_n - self.sat_sdp[j]) / dt; // surface velocity
+                self.sat_sdp[j] = sd_n;
+                let sdv = sdv_raw.clamp(-10.0, 10.0); // capped momentum transfer
+                let sacc = (sdv_raw - self.sat_sdvp[j]) / dt; // surface accel
+                self.sat_sdvp[j] = sdv_raw;
+                if b_snc > 0.0 && self.sat_carried[j] {
+                    // CARRIED: riding the surface silently. HOP when the
+                    // table drops out faster than gravity (the vibrating-
+                    // table condition) — then ballistic with the (capped)
+                    // table velocity. Dense chatter while the body is loud,
+                    // silence as it calms: the settle arc, physically.
+                    self.sat_z[j] = sd_n;
+                    self.sat_v[j] = sdv;
+                    if sacc < -self.sat_grav {
+                        self.sat_carried[j] = false;
+                        self.sat_incontact[j] = false;
+                    }
+                } else {
+                    if pen > 0.0 && !self.sat_incontact[j] {
+                        // click loudness = APPROACH SPEED (impact velocity),
+                        // not instantaneous penetration — the entry sample
+                        // has only crossed by a hair; pen^1.5 there is
+                        // near-zero and starves both voice and shock.
+                        let rel_speed = (self.sat_v[j] - sdv).abs();
+                        // impact velocity is physical in EVERY regime — not
+                        // bounce-gated (fixed reference scale for stability)
+                        let hit_amp = f_n + 0.55 * (rel_speed / 17.3).min(3.0);
+                        if b_snc > 0.0 {
+                            // entry — restitution off the moving surface
+                            let rel = self.sat_v[j] - sdv;
+                            if rel < 0.0 {
+                                self.sat_v[j] = sdv - restitution * rel;
+                                // slow post-bounce relative speed => CAPTURED
+                                if (self.sat_v[j] - sdv).abs() < 0.15 * self.sat_grav.sqrt()
+                                {
+                                    self.sat_carried[j] = true;
+                                }
+                            }
+                        }
+                        shock += hit_amp; // rattle->cascade shock (entries only)
+                        self.entries += 1;
+                        // ring the satellite's partial voice
+                        for q in 0..SAT_PARTIALS {
+                            self.sat_pu[j][q] += hit_amp * self.sat_pamp[j][q];
+                        }
+                    }
+                    self.sat_incontact[j] = pen > 0.0;
+                    // pressed buzz: continuous contact scrape drives the
+                    // voice too (bounce mode is pure event-clicks)
+                    if pen > 0.0 && b_snc < 1.0 {
+                        let scrape = f_n * 0.12 * (1.0 - b_snc);
+                        for q in 0..SAT_PARTIALS {
+                            self.sat_pu[j][q] += scrape * self.sat_pamp[j][q];
+                        }
+                    }
+                    let acc = -om * om * (self.sat_z[j] - rest) * (1.0 - b_snc)
+                        - self.sat_grav * b_snc
+                        - 2.0 * self.sat_ze[j] * om * self.sat_v[j] * (1.0 - 0.7 * b_snc)
+                        + self.sat_kc[j] * f_n * (1.0 - b_snc);
+                    self.sat_v[j] += dt * acc;
+                    self.sat_z[j] += dt * self.sat_v[j];
+                }
+                // finite tripwire: a non-finite satellite resets to rest
+                // (passivity insurance under hostile parameter fuzz)
+                if !(self.sat_z[j].is_finite() && self.sat_v[j].is_finite()) {
+                    self.sat_z[j] = rest;
+                    self.sat_v[j] = 0.0;
+                    self.sat_carried[j] = false;
+                }
+                // bounce mode is event physics — continuous push-reaction is
+                // pressed-mode physics only (also starves the pump)
+                sat_react[j] = 0.15 * f_n * (1.0 - b_snc);
+                // multi-modal voice: partial rotors ring; sum is the radiation
+                let mut voice = 0.0f32;
+                for q in 0..SAT_PARTIALS {
+                    if self.sat_pamp[j][q] > 0.0 {
+                        let pu = self.sat_prr[j][q]
+                            * (self.sat_pu[j][q] * self.sat_pcw[j][q]
+                                - self.sat_pv[j][q] * self.sat_psw[j][q]);
+                        let pv = self.sat_prr[j][q]
+                            * (self.sat_pu[j][q] * self.sat_psw[j][q]
+                                + self.sat_pv[j][q] * self.sat_pcw[j][q]);
+                        self.sat_pu[j][q] = pu;
+                        self.sat_pv[j][q] = pv;
+                        voice += pu * self.sat_pamp[j][q];
+                    }
+                }
+                sat_radiate += p.sat_level[j] * voice;
+                // ---- R bank (stereo only), same laws, own contact events
                 if stereo {
                     self.sat_speak_r[j] = self.sat_speak_r[j].max(sd_r.abs());
                     let sd_nr = sd_r / self.sat_speak_r[j];
@@ -918,19 +1228,105 @@ impl Engine {
                     } else {
                         0.0
                     };
-                    let acc_r = -om * om * (self.sat_z_r[j] - p.sat_rest[j])
-                        - 2.0 * self.sat_ze[j] * om * self.sat_v_r[j]
-                        + self.sat_kc[j] * f_nr;
-                    self.sat_v_r[j] += dt * acc_r;
-                    self.sat_z_r[j] += dt * self.sat_v_r[j];
-                    sat_react_r[j] = 0.15 * f_nr;
-                    sat_radiate_r += p.sat_level[j] * self.sat_v_r[j] / om;
+                    let sdv_raw_r = (sd_nr - self.sat_sdp_r[j]) / dt;
+                    self.sat_sdp_r[j] = sd_nr;
+                    let sdv_r = sdv_raw_r.clamp(-10.0, 10.0);
+                    let sacc_r = (sdv_raw_r - self.sat_sdvp_r[j]) / dt;
+                    self.sat_sdvp_r[j] = sdv_raw_r;
+                    if b_snc > 0.0 && self.sat_carried_r[j] {
+                        self.sat_z_r[j] = sd_nr;
+                        self.sat_v_r[j] = sdv_r;
+                        if sacc_r < -self.sat_grav {
+                            self.sat_carried_r[j] = false;
+                            self.sat_incontact_r[j] = false;
+                        }
+                    } else {
+                        if pen_r > 0.0 && !self.sat_incontact_r[j] {
+                            let rel_speed = (self.sat_v_r[j] - sdv_r).abs();
+                            let hit_amp = f_nr + 0.55 * (rel_speed / 17.3).min(3.0);
+                            if b_snc > 0.0 {
+                                let rel = self.sat_v_r[j] - sdv_r;
+                                if rel < 0.0 {
+                                    self.sat_v_r[j] = sdv_r - restitution * rel;
+                                    if (self.sat_v_r[j] - sdv_r).abs()
+                                        < 0.15 * self.sat_grav.sqrt()
+                                    {
+                                        self.sat_carried_r[j] = true;
+                                    }
+                                }
+                            }
+                            shock += hit_amp;
+                            self.entries += 1;
+                            for q in 0..SAT_PARTIALS {
+                                self.sat_pu_r[j][q] += hit_amp * self.sat_pamp[j][q];
+                            }
+                        }
+                        self.sat_incontact_r[j] = pen_r > 0.0;
+                        if pen_r > 0.0 && b_snc < 1.0 {
+                            let scrape = f_nr * 0.12 * (1.0 - b_snc);
+                            for q in 0..SAT_PARTIALS {
+                                self.sat_pu_r[j][q] += scrape * self.sat_pamp[j][q];
+                            }
+                        }
+                        let acc_r = -om * om * (self.sat_z_r[j] - rest) * (1.0 - b_snc)
+                            - self.sat_grav * b_snc
+                            - 2.0 * self.sat_ze[j] * om * self.sat_v_r[j]
+                                * (1.0 - 0.7 * b_snc)
+                            + self.sat_kc[j] * f_nr * (1.0 - b_snc);
+                        self.sat_v_r[j] += dt * acc_r;
+                        self.sat_z_r[j] += dt * self.sat_v_r[j];
+                    }
+                    if !(self.sat_z_r[j].is_finite() && self.sat_v_r[j].is_finite()) {
+                        self.sat_z_r[j] = rest;
+                        self.sat_v_r[j] = 0.0;
+                        self.sat_carried_r[j] = false;
+                    }
+                    sat_react_r[j] = 0.15 * f_nr * (1.0 - b_snc);
+                    let mut voice_r = 0.0f32;
+                    for q in 0..SAT_PARTIALS {
+                        if self.sat_pamp[j][q] > 0.0 {
+                            let pu = self.sat_prr[j][q]
+                                * (self.sat_pu_r[j][q] * self.sat_pcw[j][q]
+                                    - self.sat_pv_r[j][q] * self.sat_psw[j][q]);
+                            let pv = self.sat_prr[j][q]
+                                * (self.sat_pu_r[j][q] * self.sat_psw[j][q]
+                                    + self.sat_pv_r[j][q] * self.sat_pcw[j][q]);
+                            self.sat_pu_r[j][q] = pu;
+                            self.sat_pv_r[j][q] = pv;
+                            voice_r += pu * self.sat_pamp[j][q];
+                        }
+                    }
+                    sat_radiate_r += p.sat_level[j] * voice_r;
                 }
             }
+            // rattle->cascade: entry shocks kick the receiver shadow rings,
+            // scaled by sqrt(e_norm) — re-injection weakens as the bank
+            // calms (the buckling passivity law): convergent, no limit cycle
+            self.rc_shock = if p.rattle_casc > 0.0 {
+                shock * e_low_norm.sqrt()
+            } else {
+                0.0
+            };
 
             let mut yl = 0.0f32;
             let mut yr = 0.0f32;
+            // rings accumulate SEPARATELY and join after the peak tracker:
+            // the rc-kick normalizes against dust_peak, so rings must never
+            // feed the very peak that scales their own excitation (self-
+            // referential normalization = feedback gain > 1 = inf; the
+            // passivity law applies to normalizers too)
+            let mut ring_l = 0.0f32;
+            let mut ring_r = 0.0f32;
             let coherent = p.cascade_coherent && p.cascade_amt > 0.0;
+            let rc_on = p.rattle_casc > 0.0 && self.n_sats > 0;
+            let rings_on = coherent || rc_on;
+            // contact-entry shock, this sample, scaled to ring-state units
+            // by the bank's running peak (online normalization)
+            let kick = self.rc_shock * self.dust_peak * 0.5;
+            // ring output gate: cascade path (buildup x energy) + rattle
+            // path (fixed mix — the rings decay by their own damping)
+            let ring_gate = (if coherent { casc_gain } else { 0.0 })
+                + 0.35 * p.rattle_casc.clamp(0.0, 1.0);
             let n_sats = self.n_sats;
             let sat_w = &self.sat_w;
             let detuned = self.detuned;
@@ -963,21 +1359,42 @@ impl Engine {
                 let mut cl = if m.low { u * dep } else { u };
                 let r_tap = ru * m.ct + rv * m.st;
                 let mut cr = if m.low { r_tap * dep } else { r_tap };
-                if coherent && !m.low {
-                    let u2 = m.r * (m.u2 * m.cw - m.v2 * m.sw);
-                    let v2 = m.r * (m.u2 * m.sw + m.v2 * m.cw);
+                if rings_on && !m.low {
+                    let mut u2 = m.r * (m.u2 * m.cw - m.v2 * m.sw);
+                    let mut v2 = m.r * (m.u2 * m.sw + m.v2 * m.cw);
+                    if rc_on && kick > 0.0 {
+                        // phase-salted shock kick (the DC-click lesson:
+                        // never kick a hundred rings in phase)
+                        let ph = 2.0 * core::f32::consts::PI * ((k as f32 * PHI) % 1.0);
+                        u2 += kick * m.inj_rc * ph.sin();
+                        v2 += kick * m.inj_rc * ph.cos();
+                    }
                     m.u2 = u2;
                     m.v2 = v2;
-                    cl += u2 * casc_gain;
-                    cr += (u2 * m.ct + v2 * m.st) * casc_gain;
+                    ring_l += u2 * ring_gate * m.pgl;
+                    ring_r += (u2 * m.ct + v2 * m.st) * ring_gate * m.pgr;
                 }
                 // mode spread: equal-power pan (1.0/1.0 at spread 0)
                 yl += cl * m.pgl;
                 yr += cr * m.pgr;
             }
             // shared bank-peak tracker (rattle + dust normalizers) — L side,
-            // matching the mono lineage
+            // matching the mono lineage. Rings join LAST (after dust): they
+            // must not feed the kick normalizer (feedback) NOR the dust
+            // envelope (env_n > 1 meets the thr=0 dB pole — see dust block).
             self.dust_peak = self.dust_peak.max(yl.abs());
+            // M8 — radiation smoother (2x one-pole @10 kHz): soften click
+            // edges before normalization so the band-limit gate holds
+            self.sat_rad_lp1 =
+                self.a_rad * self.sat_rad_lp1 + (1.0 - self.a_rad) * sat_radiate;
+            self.sat_rad_lp2 =
+                self.a_rad * self.sat_rad_lp2 + (1.0 - self.a_rad) * self.sat_rad_lp1;
+            let sat_radiate = self.sat_rad_lp2;
+            self.sat_rad_lp1r =
+                self.a_rad * self.sat_rad_lp1r + (1.0 - self.a_rad) * sat_radiate_r;
+            self.sat_rad_lp2r =
+                self.a_rad * self.sat_rad_lp2r + (1.0 - self.a_rad) * self.sat_rad_lp1r;
+            let sat_radiate_r = self.sat_rad_lp2r;
             if self.n_sats > 0 {
                 self.sat_peak = self.sat_peak.max(sat_radiate.abs());
                 if self.sat_peak > 1e-9 {
@@ -1008,9 +1425,17 @@ impl Engine {
                 let a_env = self.a_env;
                 self.dust_env = a_env * self.dust_env + (1.0 - a_env) * ay;
                 let env_n = self.dust_env / self.dust_peak;
-                let thr = (10.0f32).powf(p.dust_thr_db / 20.0);
+                // thr capped below 1: at dust_thr_db == 0 the (1 - thr)
+                // denominator is a POLE (div-by-zero -> inf output; found by
+                // param fuzz). Latent since M3.2, exposed when env_n could
+                // exceed 1.
+                let thr = (10.0f32).powf(p.dust_thr_db / 20.0).min(0.999);
+                // knee denominator floored: near thr = 0 dB the exact
+                // (1 - thr) normalization is a gain pole (~1000x just under
+                // the cap) — floor keeps extreme thresholds selective
+                // without the amplification cliff
                 let g = if env_n > thr {
-                    ((env_n - thr) / (1.0 - thr)).powf(p.dust_follow)
+                    ((env_n - thr) / (1.0 - thr).max(0.15)).powf(p.dust_follow)
                 } else {
                     0.0
                 };
@@ -1032,6 +1457,9 @@ impl Engine {
                     yr += d_l;
                 }
             }
+            // rings join the output last (kept out of every normalizer path)
+            yl += ring_l;
+            yr += ring_r;
             // bracing choke: early clamp that releases (both channels)
             if p.brace_choke > 0.0 {
                 let ch = (-(self.t) * 14.0 * p.brace_choke * (-self.t / 0.05).exp()).exp();

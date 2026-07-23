@@ -12,7 +12,7 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 || args[0] != "render" {
-        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
+        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
     let out_path = &args[1];
     let mut p = EngineParams::default();
@@ -61,29 +61,65 @@ fn main() {
             "--brace" => brace = Some(val()),
             "--sats" => {
                 i += 1;
-                let (n, fs, t60s, seats, rests, levels): (u32, [f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 4]) =
-                    match args.get(i).map(|s| s.as_str()) {
-                        Some("wires") => (2, [1900.0, 2700.0, 0.0, 0.0], [0.10, 0.08, 0.1, 0.1],
-                                          [0.22, 0.61, 0.0, 0.0], [0.15, 0.22, 0.0, 0.0],
-                                          [1.0, 0.8, 0.0, 0.0]),
-                        Some("loose") => (1, [900.0, 0.0, 0.0, 0.0], [0.15, 0.1, 0.1, 0.1],
-                                          [0.45, 0.0, 0.0, 0.0], [0.55, 0.0, 0.0, 0.0],
-                                          [1.0, 0.0, 0.0, 0.0]),
-                        Some("trash") => (3, [1300.0, 2100.0, 3400.0, 0.0], [0.12, 0.10, 0.07, 0.1],
-                                          [0.18, 0.52, 0.80, 0.0], [0.30, 0.45, 0.20, 0.0],
-                                          [1.0, 0.9, 0.7, 0.0]),
-                        _ => die("--sats wires|loose|trash"),
-                    };
+                // M8 re-voicing: each satellite is a small modal OBJECT
+                // (partial ratio/amp sets), not a sine — the one deliberate
+                // baseline sound change of the round.
+                let (n, fs, t60s, seats, rests, levels, pr, pa): (
+                    u32, [f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 4],
+                    [[f32; 4]; 4], [[f32; 4]; 4],
+                ) = match args.get(i).map(|s| s.as_str()) {
+                    Some("wires") => (
+                        2, [1900.0, 2700.0, 0.0, 0.0], [0.10, 0.08, 0.1, 0.1],
+                        [0.22, 0.61, 0.0, 0.0], [0.15, 0.22, 0.0, 0.0],
+                        [1.0, 0.8, 0.0, 0.0],
+                        // bright inharmonic wire sets, 3 partials each
+                        [[1.0, 1.53, 2.31, 0.0], [1.0, 1.71, 2.63, 0.0],
+                         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                        [[1.0, 0.6, 0.35, 0.0], [1.0, 0.55, 0.3, 0.0],
+                         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                    ),
+                    Some("loose") => (
+                        1, [900.0, 0.0, 0.0, 0.0], [0.15, 0.1, 0.1, 0.1],
+                        [0.45, 0.0, 0.0, 0.0], [0.55, 0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0],
+                        // dull knocker + one overtone
+                        [[1.0, 2.7, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                        [[1.0, 0.4, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                    ),
+                    Some("trash") => (
+                        3, [1300.0, 2100.0, 3400.0, 0.0], [0.12, 0.10, 0.07, 0.1],
+                        [0.18, 0.52, 0.80, 0.0], [0.30, 0.45, 0.20, 0.0],
+                        [1.0, 0.9, 0.7, 0.0],
+                        // clattery junk: spread 3-4 partial sets
+                        [[1.0, 1.34, 1.83, 2.51], [1.0, 1.47, 2.06, 2.9],
+                         [1.0, 1.62, 2.24, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                        [[1.0, 0.7, 0.5, 0.35], [1.0, 0.65, 0.45, 0.3],
+                         [1.0, 0.6, 0.4, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                    ),
+                    _ => die("--sats wires|loose|trash"),
+                };
                 p.sat_count = n;
                 p.sat_fs = fs;
                 p.sat_t60 = t60s;
                 p.sat_seat = seats;
                 p.sat_rest = rests;
                 p.sat_level = levels;
+                p.sat_pr = pr;
+                p.sat_pa = pa;
             }
             "--dust-level" => p.dust_level = val(),
             "--dust-thr" => p.dust_thr_db = val(),
             "--dust-follow" => p.dust_follow = val(),
+            // M8 — the rattle control surface
+            "--rattle-casc" => p.rattle_casc = val(),
+            "--bounce" => p.bounce = val(),
+            "--rattle-gap" => p.rattle_gap = val(),
+            "--gap-vel" => p.gap_vel = val(),
+            "--rattle-tune" => p.rattle_tune = val() / 12.0, // flag in SEMITONES
+            "--rattle-track" => p.rattle_track = val(),
+            "--walk" => p.walk = val(),
             "--exciter" => {
                 i += 1;
                 p.exciter = match args.get(i).map(|s| s.as_str()) {
@@ -189,13 +225,14 @@ fn main() {
     w.finalize().unwrap();
     let (cl, cr) = engine.contacts_lr();
     eprintln!(
-        "clg: {} samples ({:.2} s), {} modes, {} contact-samples (L {} / R {}), peak {:.3} -> {}",
+        "clg: {} samples ({:.2} s), {} modes, {} contact-samples (L {} / R {}), {} entries, peak {:.3} -> {}",
         buf_l.len(),
         buf_l.len() as f32 / sr,
         engine.n_modes(),
         engine.contacts(),
         cl,
         cr,
+        engine.entries(),
         peak,
         out_path
     );

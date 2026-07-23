@@ -20,14 +20,18 @@ use crate::plugin::{
     PARAM_T60_ID, PARAM_TILT_ID, PARAM_TUNE_ID, PARAM_DECOHERE_ID, PARAM_SFLOOR_ID,
     PARAM_SIZE_ID, PARAM_VELCURVE_ID, PARAM_RATTLE_LEVEL_ID, PARAM_MODE_SPREAD_ID,
     PARAM_DAMP_ASYM_ID, PARAM_SUB_ROTATE_ID, PARAM_EXCITER_ID, PARAM_EX_COLOR_ID,
-    PARAM_EX_TIME_ID, param_clamp,
+    PARAM_EX_TIME_ID, PARAM_RATTLE_CASC_ID, PARAM_BOUNCE_ID, PARAM_RATTLE_GAP_ID,
+    PARAM_GAP_VEL_ID, PARAM_RATTLE_TUNE_ID, PARAM_RATTLE_TRACK_ID, PARAM_WALK_ID,
+    param_clamp,
     param_default, param_exists,
 };
 
 // Derived from the param table — never hand-sized again (M7 lesson).
 pub(crate) const PARAM_SLOTS: usize = crate::plugin::PARAM_COUNT;
 
-/// Satellite presets, mirroring the `clg` CLI (`--sats`).
+/// Satellite presets, mirroring the `clg` CLI (`--sats`). M8: each
+/// satellite is a small modal OBJECT (partial ratio/amp sets) — the
+/// round's one deliberate baseline sound change.
 type SatPreset = (
     u32,
     [f32; MAX_SATS],
@@ -35,10 +39,21 @@ type SatPreset = (
     [f32; MAX_SATS],
     [f32; MAX_SATS],
     [f32; MAX_SATS],
+    [[f32; 4]; MAX_SATS], // partial freq ratios
+    [[f32; 4]; MAX_SATS], // partial amplitudes
 );
 
 const SAT_PRESETS: [SatPreset; 4] = [
-    (0, [0.0; 4], [0.1; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
+    (
+        0,
+        [0.0; 4],
+        [0.1; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [[1.0, 0.0, 0.0, 0.0]; 4],
+        [[1.0, 0.0, 0.0, 0.0]; 4],
+    ),
     (
         2,
         [1900.0, 2700.0, 0.0, 0.0],
@@ -46,6 +61,11 @@ const SAT_PRESETS: [SatPreset; 4] = [
         [0.22, 0.61, 0.0, 0.0],
         [0.15, 0.22, 0.0, 0.0],
         [1.0, 0.8, 0.0, 0.0],
+        // bright inharmonic wire sets
+        [[1.0, 1.53, 2.31, 0.0], [1.0, 1.71, 2.63, 0.0],
+         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        [[1.0, 0.6, 0.35, 0.0], [1.0, 0.55, 0.3, 0.0],
+         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
     ),
     (
         1,
@@ -54,6 +74,11 @@ const SAT_PRESETS: [SatPreset; 4] = [
         [0.45, 0.0, 0.0, 0.0],
         [0.55, 0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0, 0.0],
+        // dull knocker + one overtone
+        [[1.0, 2.7, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        [[1.0, 0.4, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+         [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
     ),
     (
         3,
@@ -62,6 +87,11 @@ const SAT_PRESETS: [SatPreset; 4] = [
         [0.18, 0.52, 0.80, 0.0],
         [0.30, 0.45, 0.20, 0.0],
         [1.0, 0.9, 0.7, 0.0],
+        // clattery junk: spread partial sets
+        [[1.0, 1.34, 1.83, 2.51], [1.0, 1.47, 2.06, 2.9],
+         [1.0, 1.62, 2.24, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        [[1.0, 0.7, 0.5, 0.35], [1.0, 0.65, 0.45, 0.3],
+         [1.0, 0.6, 0.4, 0.0], [1.0, 0.0, 0.0, 0.0]],
     ),
 ];
 
@@ -107,7 +137,7 @@ impl SharedState {
         let f0 = tune * (2.0f32).powf((key as f32 - 60.0) / 12.0);
         // Vel Curve (Batch 002 promise): the exposed velocity-response ladder
         let velocity = velocity.clamp(0.0, 1.0).powf(self.v(PARAM_VELCURVE_ID));
-        let (n, fs, t60s, seats, rests, levels) =
+        let (n, fs, t60s, seats, rests, levels, pr, pa) =
             SAT_PRESETS[(self.v(PARAM_SATS_ID).round() as usize).min(3)];
         let mut p = EngineParams {
             arch: match self.v(PARAM_ARCH_ID).round() as usize {
@@ -136,6 +166,15 @@ impl SharedState {
             sat_seat: seats,
             sat_rest: rests,
             sat_level: levels,
+            sat_pr: pr,
+            sat_pa: pa,
+            rattle_casc: self.v(PARAM_RATTLE_CASC_ID),
+            bounce: self.v(PARAM_BOUNCE_ID),
+            rattle_gap: self.v(PARAM_RATTLE_GAP_ID),
+            gap_vel: self.v(PARAM_GAP_VEL_ID),
+            rattle_tune: self.v(PARAM_RATTLE_TUNE_ID) / 12.0, // st -> octaves
+            rattle_track: self.v(PARAM_RATTLE_TRACK_ID),
+            walk: self.v(PARAM_WALK_ID),
             dust_level: self.v(PARAM_DUST_LEVEL_ID),
             decohere: self.v(PARAM_DECOHERE_ID),
             stereo_floor: self.v(PARAM_SFLOOR_ID),
@@ -182,6 +221,59 @@ mod tests {
             );
         }
         assert!(!crate::plugin::param_exists(crate::plugin::PARAM_COUNT as u32));
+    }
+
+    #[test]
+    /// M8 fuzz-hang reproducer: random params + random keys through the
+    /// host path, many retriggers, wall-clock guarded. The clap-validator
+    /// param-fuzz-basic wedge must be reproducible here or it's wrapper-side.
+    #[test]
+    fn param_fuzz_stress_host_path() {
+        use std::time::Instant;
+        let sr = 44100.0f32;
+        let s = SharedState::new();
+        let mut rng: u32 = 0x1234_5678;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng as f64) / (u32::MAX as f64)
+        };
+        let mut engines: Vec<clg_engine::Engine> =
+            (0..8).map(|_| clg_engine::Engine::new(sr)).collect();
+        let mut last_p: Vec<Option<clg_engine::EngineParams>> = vec![None; 8];
+        let t0 = Instant::now();
+        let mut l = [0.0f32; 256];
+        let mut r = [0.0f32; 256];
+        for cycle in 0..300 {
+            // fuzz every param to a random in-range value
+            for id in 0..crate::plugin::PARAM_COUNT as u32 {
+                let v = next();
+                // set_parameter_value clamps to the spec range from any input
+                let _ = s.set_parameter_value(id, -100.0 + 300.0 * v);
+            }
+            let key = (next() * 127.0) as i16;
+            let vel = next() as f32;
+            let p = s.engine_params_for_note(key, vel.max(0.02));
+            last_p[cycle % 8] = Some(p);
+            engines[cycle % 8].trigger(&p);
+            for (ei, e) in engines.iter_mut().enumerate() {
+                for blk in 0..4 {
+                    e.process(&mut l, &mut r);
+                    // the validator's pass condition: EVERY sample finite
+                    if !l.iter().chain(r.iter()).all(|x| x.is_finite()) {
+                        panic!(
+                            "non-finite output: cycle {cycle} voice {ei} blk {blk}\nPARAMS: {:#?}",
+                            last_p[ei]
+                        );
+                    }
+                }
+            }
+            assert!(
+                t0.elapsed().as_secs() < 30,
+                "WEDGE reproduced at cycle {cycle}"
+            );
+        }
     }
 
     #[test]

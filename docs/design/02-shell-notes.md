@@ -290,3 +290,36 @@ forces him to delete and rebuild his patch. Renumbering is therefore
 free — but it also means param additions have a per-round human cost:
 **batch new params into as few rounds as possible** rather than
 dribbling them in.
+
+## M8 — satellite redesign (2026-07-22)
+
+Params 33–39 (one batched drop): Rattle>Casc, Bounce, Rattle Gap,
+Gap Vel, Rattle Tune (±24 st), Rattle Track, Walk. Table dense 0–39.
+
+Laws: multi-modal satellites (per-preset partial ratio/amp sets; decay
+∝ ratio^-0.7; 2×10 kHz radiation smoother for the band-limit gate);
+bounce = carry/hop/capture (surface-acceleration detach at −g,
+restitution 0.4+0.3b < 1, table velocity capped ±10); click amplitude
+= impact velocity (f_n + 0.55·(rel/17.3), NOT penetration — entry
+samples have near-zero pen); gap = 2·gap·((1−gv)+gv·2v), decay-
+tightened ×(1−0.6·b·(1−e_norm)), floor 0.05; collision→cascade =
+phase-salted shock kicks into the shadow rings, own output gate
+0.35·rc, kicks normalized by bank peak; tune/track scale partials AND
+contact ω (clamped to symplectic stability 1.885·sr); walk = ctrl-rate
+seat drift, per-channel salted.
+
+Bugs found by the gates (all fixed): (1) hover fixed-point ate the
+settle → carry/hop/capture physics; (2) entry clicks starved (pen ≈ 0
+at entry) → impact-velocity law; (3) ring kicks normalized against a
+peak that included ring output → feedback blowup → rings excluded
+from all normalizer paths, join output last; (4) dust threshold knee:
+div-by-zero pole at thr = 0 dB (LATENT SINCE M3.2, exposed by fuzz) →
+thr capped 0.999 + knee denominator floored 0.15; (5) rectified
+unilateral reaction at high contact duty = parametric pump (no-drone
+gate) → gap floor + reaction is pressed-mode-only (×(1−bounce)).
+
+Validation: param-fuzz clean ×2 (was hanging the validator via
+non-finite output — reproduced by `state::tests::
+param_fuzz_stress_host_path`, now a permanent per-sample-finiteness
+gate); clap-validator 18/18 non-skipped 0 warnings; auval SUCCEEDED;
+defaults regression bit-identical.

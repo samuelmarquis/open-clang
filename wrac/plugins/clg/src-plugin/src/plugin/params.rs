@@ -46,6 +46,14 @@ pub(crate) const PARAM_SUB_ROTATE_ID: u32 = 29;
 pub(crate) const PARAM_EXCITER_ID: u32 = 30;
 pub(crate) const PARAM_EX_COLOR_ID: u32 = 31;
 pub(crate) const PARAM_EX_TIME_ID: u32 = 32;
+// M8 — the rattle control surface (one batched drop, 2026-07-22)
+pub(crate) const PARAM_RATTLE_CASC_ID: u32 = 33;
+pub(crate) const PARAM_BOUNCE_ID: u32 = 34;
+pub(crate) const PARAM_RATTLE_GAP_ID: u32 = 35;
+pub(crate) const PARAM_GAP_VEL_ID: u32 = 36;
+pub(crate) const PARAM_RATTLE_TUNE_ID: u32 = 37;
+pub(crate) const PARAM_RATTLE_TRACK_ID: u32 = 38;
+pub(crate) const PARAM_WALK_ID: u32 = 39;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -218,6 +226,15 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     choice(PARAM_EXCITER_ID, "Exciter", EXCITER_NAMES, 0.0),
     continuous(PARAM_EX_COLOR_ID, "Ex Color", 0.0, 1.0, 0.5, Format::Percent),
     continuous(PARAM_EX_TIME_ID, "Ex Time", 0.0, 1.0, 0.5, Format::Percent),
+    // M8 — the rattle control surface (satellite redesign round; defaults
+    // preserve pre-M8 behavior except the multi-modal preset re-voicing)
+    continuous(PARAM_RATTLE_CASC_ID, "Rattle>Casc", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_BOUNCE_ID, "Bounce", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_RATTLE_GAP_ID, "Rattle Gap", 0.0, 1.0, 0.5, Format::Percent),
+    continuous(PARAM_GAP_VEL_ID, "Gap Vel", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_RATTLE_TUNE_ID, "Rattle Tune", -24.0, 24.0, 0.0, Format::Plain),
+    continuous(PARAM_RATTLE_TRACK_ID, "Rattle Track", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_WALK_ID, "Walk", 0.0, 1.0, 0.0, Format::Percent),
 ];
 
 /// The single source of truth for the parameter-store size. The
