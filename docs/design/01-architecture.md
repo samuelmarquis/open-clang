@@ -325,11 +325,25 @@ becomes canonical. First batches:
   velocity-response curve (Batch 002 promise), glide-depth-scales-
   with-size (Batch 002 action), sample-rate correctness pass (44.1k
   hardcoded coefficients), sub-block note timing, MPE/choke decision.
+- **M9** — the wire-bed (snare round, 2026-07-23): dust promoted to a
+  true snare mechanism — own attack/release envelope (release may
+  EXCEED body T60: the decay inversion, tone-dies-noise-hangs),
+  selectable drive source region, wire-comb shimmer, brightness,
+  compressive follow. Cheapest path to "reads as snare."
+- **M10** — NESS/Net1 topology round: second head + cavity coupling
+  (the never-built R1⇄R2, per research 01 §A.2 — the literal NESS
+  snare topology; also the "hollow" percept for shells generally) +
+  Net1 rattling interconnections (satellite chains; the bar-rescue
+  vehicle).
 - **M-panel** — DEFERRED (2026-07-22): the panel waits on Sam's
   separate design-system effort (shared visual language for the
-  sister plugins); re-enters the roadmap on his call. Transect drum,
-  placement-curve editor, honest alarms, catalogue v01 — all specs
-  stand.
+  sister plugins); re-enters the roadmap on his call. Interaction
+  model per Sam (2026-07-23): **Vocodex-style drawable graph lanes**
+  — placement transect, gain lane, **decay-law curve** (draw T60 vs
+  frequency: kills the lows-always-ring bias, would have partially
+  solved snare on its own), alignment curves (the articulator),
+  envelope-follower maps. Transect drum, honest alarms, catalogue
+  v01 — all specs stand.
 - **M6** — measured-reference integrations: `02-torque-measured.md` →
   formant knob decision; `03-vocodex-measured.md` → placement-envelope
   calibration against the original trick.

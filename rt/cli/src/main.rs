@@ -12,7 +12,7 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 || args[0] != "render" {
-        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
+        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
     let out_path = &args[1];
     let mut p = EngineParams::default();
@@ -120,6 +120,10 @@ fn main() {
             "--rattle-tune" => p.rattle_tune = val() / 12.0, // flag in SEMITONES
             "--rattle-track" => p.rattle_track = val(),
             "--walk" => p.walk = val(),
+            "--bed-release" => p.bed_release = val(),
+            "--bed-source" => p.bed_source = val(),
+            "--bed-comb" => p.bed_comb = val(),
+            "--bed-bright" => p.bed_bright = val(),
             "--exciter" => {
                 i += 1;
                 p.exciter = match args.get(i).map(|s| s.as_str()) {

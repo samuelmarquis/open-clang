@@ -22,6 +22,7 @@ use crate::plugin::{
     PARAM_DAMP_ASYM_ID, PARAM_SUB_ROTATE_ID, PARAM_EXCITER_ID, PARAM_EX_COLOR_ID,
     PARAM_EX_TIME_ID, PARAM_RATTLE_CASC_ID, PARAM_BOUNCE_ID, PARAM_RATTLE_GAP_ID,
     PARAM_GAP_VEL_ID, PARAM_RATTLE_TUNE_ID, PARAM_RATTLE_TRACK_ID, PARAM_WALK_ID,
+    PARAM_BED_RELEASE_ID, PARAM_BED_SOURCE_ID, PARAM_BED_COMB_ID, PARAM_BED_BRIGHT_ID,
     param_clamp,
     param_default, param_exists,
 };
@@ -192,6 +193,10 @@ impl SharedState {
             ex_time: self.v(PARAM_EX_TIME_ID),
             dust_thr_db: self.v(PARAM_DUST_THR_ID),
             dust_follow: self.v(PARAM_DUST_FOLLOW_ID),
+            bed_release: self.v(PARAM_BED_RELEASE_ID),
+            bed_source: self.v(PARAM_BED_SOURCE_ID),
+            bed_comb: self.v(PARAM_BED_COMB_ID),
+            bed_bright: self.v(PARAM_BED_BRIGHT_ID),
             ..EngineParams::default()
         };
         apply_brace_macro(&mut p, self.v(PARAM_BRACE_ID));

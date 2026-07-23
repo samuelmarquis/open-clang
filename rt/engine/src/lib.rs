@@ -104,6 +104,21 @@ pub struct EngineParams {
     pub dust_level: f32,
     pub dust_thr_db: f32,
     pub dust_follow: f32,
+    // M9 — the wire-bed (dust promoted to a snare mechanism). All four at
+    // defaults (0/0/0/0.5) reproduce the legacy dust path bit-exactly.
+    /// 0..1 -> release 30 ms..2.5 s (log). The decay INVERSION: release may
+    /// exceed the body's T60 — tone dies, noise hangs (the snare tail).
+    pub bed_release: f32,
+    /// 0..1: follower drive from full-band output env (0, legacy) to a
+    /// mid-band head-motion region ~150-800 Hz (1) — the cavity-resonance
+    /// proxy until M10 builds the real cavity.
+    pub bed_source: f32,
+    /// 0..1: wire-comb shimmer (short feedback comb, per-channel salted,
+    /// fb < 0.9 with in-loop LP per the band-limit doctrine).
+    pub bed_comb: f32,
+    /// 0..1: noise spectral center, dark (~0.7-4 kHz) to bright
+    /// (~3.3-10 kHz); 0.5 = the legacy 1.5-6.5 kHz band.
+    pub bed_bright: f32,
     // STEREO v1 (M5): per-mode L/R decoherence. Both default 0 = the
     // canonical mono voice, bit-identical in both channels.
     /// 0..1 — per-mode L/R phase divergence (zero below 4·f0: the sub
@@ -185,6 +200,10 @@ impl Default for EngineParams {
             dust_level: 0.0,
             dust_thr_db: -40.0,
             dust_follow: 1.0,
+            bed_release: 0.0,
+            bed_source: 0.0,
+            bed_comb: 0.0,
+            bed_bright: 0.5,
             decohere: 0.0,
             stereo_floor: 0.3,
             rattle_level: 0.5,
@@ -312,10 +331,35 @@ pub struct Engine {
     sat_w_r: [[f32; MAX_MODES]; MAX_SATS],
     walk_on: bool,
     // dust
-    dust_env: f32,   // one-pole envelope of |y|
+    dust_env: f32,   // one-pole envelope of |y| (legacy path)
     dust_peak: f32,  // running peak of bank |y| (shared normalizer)
     dust_lp1: f32,   // crude bandpass: HP(lp1) then LP(lp2) states
     dust_lp2: f32,
+    // M9 wire-bed state (engaged when any bed_* param is non-default;
+    // the legacy dust path above stays bit-exact at defaults)
+    bed_env: f32,       // attack/release follower
+    bed_a_atk: f32,     // 1 ms attack (new(), sr-derived)
+    bed_a_rel: f32,     // release coeff (trigger, from bed_release)
+    bed_a_hp: f32,      // bright-derived noise band (trigger)
+    bed_a_lp: f32,
+    bed_src_s1: f32,    // source bandpass 150-800 Hz states (L tap)
+    bed_src_s2: f32,
+    a_src_hp: f32,      // 150 Hz / 800 Hz coeffs (new())
+    a_src_lp: f32,
+    comb_buf_l: [f32; 256], // wire-comb delay lines (max 0.6 ms @ 192k)
+    comb_buf_r: [f32; 256],
+    comb_pos: usize,
+    comb_dly_l: usize,  // per-channel golden-ratio salted delays (new())
+    comb_dly_r: usize,
+    comb_lp_l: f32,     // in-loop LP (band-limit doctrine)
+    comb_lp_r: f32,
+    a_comb_lp: f32,     // ~8 kHz (new())
+    bed_sm: [f32; 6],   // bed radiation smoother 6x one-pole @9.5 kHz
+    bed_smr: [f32; 6],  // (new-path only; with ZOH noise, keeps >=60 dB gate)
+    a_bsm: f32,
+    bed_hold_l: f32,    // zero-order-hold noise (2-sample): sinc rolloff
+    bed_hold_r: f32,    // buys ~19 dB at 0.45 sr for ~3 dB at the top of
+    bed_hold_ph: bool,  // the bright band — finite wire bandwidth, honestly
     // M8 — satellite radiation smoother (2x one-pole @10 kHz): bounce-mode
     // entry clicks are hard steps into the partial rotors; the doctrine's
     // band-limit gate demands softened edges (same lesson as buckling's
@@ -362,6 +406,15 @@ impl Engine {
         let a_env = (-1.0 / (0.004 * sr)).exp();
         let a_hp = (-2.0 * core::f32::consts::PI * 1500.0 / sr).exp();
         let a_lp = (-2.0 * core::f32::consts::PI * 6500.0 / sr).exp();
+        // M9 wire-bed fixed coefficients (param-dependent ones set at trigger)
+        let bed_a_atk = (-1.0 / (0.001 * sr)).exp();
+        let a_src_hp = (-2.0 * core::f32::consts::PI * 150.0 / sr).exp();
+        let a_src_lp = (-2.0 * core::f32::consts::PI * 800.0 / sr).exp();
+        let a_comb_lp = (-2.0 * core::f32::consts::PI * 8000.0 / sr).exp();
+        let a_bsm = (-2.0 * core::f32::consts::PI * 9_500.0 / sr).exp();
+        // golden-ratio salted comb delays: 0.38 ms (L) / 0.53 ms (R)
+        let comb_dly_l = ((0.00038 * sr) as usize).clamp(4, 255);
+        let comb_dly_r = ((0.00053 * sr) as usize).clamp(4, 255);
         let a_es = (-(CTRL_INTERVAL as f32 / sr) / 0.006887).exp();
         Self {
             sr,
@@ -424,6 +477,29 @@ impl Engine {
             dust_peak: 0.0,
             dust_lp1: 0.0,
             dust_lp2: 0.0,
+            bed_env: 0.0,
+            bed_a_atk,
+            bed_a_rel: 0.0,
+            bed_a_hp: a_hp,
+            bed_a_lp: a_lp,
+            bed_src_s1: 0.0,
+            bed_src_s2: 0.0,
+            a_src_hp,
+            a_src_lp,
+            comb_buf_l: [0.0; 256],
+            comb_buf_r: [0.0; 256],
+            comb_pos: 0,
+            comb_dly_l,
+            comb_dly_r,
+            comb_lp_l: 0.0,
+            comb_lp_r: 0.0,
+            a_comb_lp,
+            bed_sm: [0.0; 6],
+            bed_smr: [0.0; 6],
+            a_bsm,
+            bed_hold_l: 0.0,
+            bed_hold_r: 0.0,
+            bed_hold_ph: false,
             sat_rad_lp1: 0.0,
             sat_rad_lp2: 0.0,
             sat_rad_lp1r: 0.0,
@@ -854,6 +930,37 @@ impl Engine {
         self.dust_lp2 = 0.0;
         self.dust_lp1r = 0.0;
         self.dust_lp2r = 0.0;
+        // M9 wire-bed: param-dependent coefficients + state reset
+        {
+            let sr = self.sr;
+            // release 30 ms -> 2.5 s, log across bed_release
+            let rel_t = 0.030 * (83.333f32).powf(p.bed_release.clamp(0.0, 1.0));
+            self.bed_a_rel = (-1.0 / (rel_t * sr)).exp();
+            // brightness: 0.5 = the exact legacy band (bit-identity)
+            let b = p.bed_bright.clamp(0.0, 1.0);
+            if (b - 0.5).abs() < 1e-6 {
+                self.bed_a_hp = self.a_hp;
+                self.bed_a_lp = self.a_lp;
+            } else {
+                let hp_cut = 1500.0 * (2.2f32).powf(2.0 * b - 1.0);
+                let lp_cut = 6500.0 * (1.55f32).powf(2.0 * b - 1.0);
+                self.bed_a_hp = (-2.0 * core::f32::consts::PI * hp_cut / sr).exp();
+                self.bed_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
+            }
+            self.bed_env = 0.0;
+            self.bed_src_s1 = 0.0;
+            self.bed_src_s2 = 0.0;
+            self.comb_buf_l = [0.0; 256];
+            self.comb_buf_r = [0.0; 256];
+            self.comb_pos = 0;
+            self.comb_lp_l = 0.0;
+            self.comb_lp_r = 0.0;
+            self.bed_sm = [0.0; 6];
+            self.bed_smr = [0.0; 6];
+            self.bed_hold_l = 0.0;
+            self.bed_hold_r = 0.0;
+            self.bed_hold_ph = false;
+        }
         self.active = true;
     }
 
@@ -1456,41 +1563,134 @@ impl Engine {
             // dust layer: envelope-gated bandpassed noise, running-peak norm.
             // Stereo engaged → two uncorrelated chains (Microtonic dispersion);
             // otherwise the legacy single chain, duplicated (bit-identity).
+            // M9: at bed_* defaults the LEGACY path runs verbatim
+            // (bit-identical); any non-default bed param engages the
+            // wire-bed pipeline (own release, source region, comb, bright).
             if p.dust_level > 0.0 {
-                let ay = yl.abs();
-                let a_env = self.a_env;
-                self.dust_env = a_env * self.dust_env + (1.0 - a_env) * ay;
-                let env_n = self.dust_env / self.dust_peak;
-                // thr capped below 1: at dust_thr_db == 0 the (1 - thr)
-                // denominator is a POLE (div-by-zero -> inf output; found by
-                // param fuzz). Latent since M3.2, exposed when env_n could
-                // exceed 1.
+                let legacy_bed = p.bed_release <= 0.0
+                    && p.bed_source <= 0.0
+                    && p.bed_comb <= 0.0
+                    && (p.bed_bright - 0.5).abs() < 1e-6;
                 let thr = (10.0f32).powf(p.dust_thr_db / 20.0).min(0.999);
-                // knee denominator floored: near thr = 0 dB the exact
-                // (1 - thr) normalization is a gain pole (~1000x just under
-                // the cap) — floor keeps extreme thresholds selective
-                // without the amplification cliff
-                let g = if env_n > thr {
-                    ((env_n - thr) / (1.0 - thr).max(0.15)).powf(p.dust_follow)
+                if legacy_bed {
+                    let ay = yl.abs();
+                    let a_env = self.a_env;
+                    self.dust_env = a_env * self.dust_env + (1.0 - a_env) * ay;
+                    let env_n = self.dust_env / self.dust_peak;
+                    // thr capped below 1: at dust_thr_db == 0 the (1 - thr)
+                    // denominator is a POLE (div-by-zero -> inf output; found
+                    // by param fuzz). Latent since M3.2, exposed when env_n
+                    // could exceed 1.
+                    // knee denominator floored: near thr = 0 dB the exact
+                    // (1 - thr) normalization is a gain pole (~1000x just
+                    // under the cap) — floor keeps extreme thresholds
+                    // selective without the amplification cliff
+                    let g = if env_n > thr {
+                        ((env_n - thr) / (1.0 - thr).max(0.15)).powf(p.dust_follow)
+                    } else {
+                        0.0
+                    };
+                    let a_hp = self.a_hp;
+                    let a_lp = self.a_lp;
+                    let w = self.white();
+                    self.dust_lp1 = a_hp * self.dust_lp1 + (1.0 - a_hp) * w;
+                    let hp = w - self.dust_lp1;
+                    self.dust_lp2 = a_lp * self.dust_lp2 + (1.0 - a_lp) * hp;
+                    let d_l =
+                        p.dust_level * self.dust_lp2 * g * self.dust_peak * 0.7;
+                    yl += d_l;
+                    if stereo {
+                        let w2 = self.white();
+                        self.dust_lp1r = a_hp * self.dust_lp1r + (1.0 - a_hp) * w2;
+                        let hp2 = w2 - self.dust_lp1r;
+                        self.dust_lp2r = a_lp * self.dust_lp2r + (1.0 - a_lp) * hp2;
+                        yr += p.dust_level * self.dust_lp2r * g * self.dust_peak * 0.7;
+                    } else {
+                        yr += d_l;
+                    }
                 } else {
-                    0.0
-                };
-                let a_hp = self.a_hp;
-                let a_lp = self.a_lp;
-                let w = self.white();
-                self.dust_lp1 = a_hp * self.dust_lp1 + (1.0 - a_hp) * w;
-                let hp = w - self.dust_lp1;
-                self.dust_lp2 = a_lp * self.dust_lp2 + (1.0 - a_lp) * hp;
-                let d_l = p.dust_level * self.dust_lp2 * g * self.dust_peak * 0.7;
-                yl += d_l;
-                if stereo {
-                    let w2 = self.white();
-                    self.dust_lp1r = a_hp * self.dust_lp1r + (1.0 - a_hp) * w2;
-                    let hp2 = w2 - self.dust_lp1r;
-                    self.dust_lp2r = a_lp * self.dust_lp2r + (1.0 - a_lp) * hp2;
-                    yr += p.dust_level * self.dust_lp2r * g * self.dust_peak * 0.7;
-                } else {
-                    yr += d_l;
+                    // ---- M9 wire-bed pipeline ----
+                    // source region: crossfade full-band |y| with the
+                    // 150-800 Hz head-motion band (cavity proxy). Taps the
+                    // same post-rattle, pre-bed point as legacy — no bed or
+                    // ring output feeds it (normalizer law).
+                    self.bed_src_s1 =
+                        self.a_src_hp * self.bed_src_s1 + (1.0 - self.a_src_hp) * yl;
+                    let src_hp = yl - self.bed_src_s1;
+                    self.bed_src_s2 =
+                        self.a_src_lp * self.bed_src_s2 + (1.0 - self.a_src_lp) * src_hp;
+                    let src = (1.0 - p.bed_source) * yl.abs()
+                        + p.bed_source * self.bed_src_s2.abs() * 2.0;
+                    // attack/release follower: 1 ms up, bed_release down —
+                    // release may exceed body T60 (the decay inversion)
+                    if src > self.bed_env {
+                        self.bed_env =
+                            self.bed_a_atk * self.bed_env + (1.0 - self.bed_a_atk) * src;
+                    } else {
+                        self.bed_env *= self.bed_a_rel;
+                    }
+                    let env_n = self.bed_env / self.dust_peak;
+                    let g = if env_n > thr {
+                        ((env_n - thr) / (1.0 - thr).max(0.15)).powf(p.dust_follow)
+                    } else {
+                        0.0
+                    };
+                    let a_hp = self.bed_a_hp;
+                    let a_lp = self.bed_a_lp;
+                    let fb = 0.88 * p.bed_comb;
+                    // ZOH noise: hold white for 2 samples (sinc rolloff —
+                    // the cheap 19 dB toward the band-limit gate)
+                    if !self.bed_hold_ph {
+                        self.bed_hold_l = self.white();
+                        if stereo {
+                            self.bed_hold_r = self.white();
+                        }
+                    }
+                    self.bed_hold_ph = !self.bed_hold_ph;
+                    // L chain: bright-banded noise -> wire comb -> smoother
+                    let w = self.bed_hold_l;
+                    self.dust_lp1 = a_hp * self.dust_lp1 + (1.0 - a_hp) * w;
+                    let hp = w - self.dust_lp1;
+                    self.dust_lp2 = a_lp * self.dust_lp2 + (1.0 - a_lp) * hp;
+                    let idx_l = (self.comb_pos + 256 - self.comb_dly_l) & 255;
+                    let dl = self.comb_buf_l[idx_l];
+                    self.comb_lp_l =
+                        self.a_comb_lp * self.comb_lp_l + (1.0 - self.a_comb_lp) * dl;
+                    let cw_l = self.dust_lp2 + fb * self.comb_lp_l;
+                    self.comb_buf_l[self.comb_pos] = cw_l;
+                    let shaped_l = (1.0 - p.bed_comb) * self.dust_lp2 + p.bed_comb * cw_l;
+                    let mut sm = shaped_l;
+                    for s in self.bed_sm.iter_mut() {
+                        *s = self.a_bsm * *s + (1.0 - self.a_bsm) * sm;
+                        sm = *s;
+                    }
+                    let d_l = p.dust_level * sm * g * self.dust_peak * 0.7;
+                    yl += d_l;
+                    if stereo {
+                        let w2 = self.bed_hold_r;
+                        self.dust_lp1r = a_hp * self.dust_lp1r + (1.0 - a_hp) * w2;
+                        let hp2 = w2 - self.dust_lp1r;
+                        self.dust_lp2r = a_lp * self.dust_lp2r + (1.0 - a_lp) * hp2;
+                        let idx_r = (self.comb_pos + 256 - self.comb_dly_r) & 255;
+                        let dr = self.comb_buf_r[idx_r];
+                        self.comb_lp_r =
+                            self.a_comb_lp * self.comb_lp_r + (1.0 - self.a_comb_lp) * dr;
+                        let cw_r = self.dust_lp2r + fb * self.comb_lp_r;
+                        self.comb_buf_r[self.comb_pos] = cw_r;
+                        let shaped_r =
+                            (1.0 - p.bed_comb) * self.dust_lp2r + p.bed_comb * cw_r;
+                        let mut smr = shaped_r;
+                        for s in self.bed_smr.iter_mut() {
+                            *s = self.a_bsm * *s + (1.0 - self.a_bsm) * smr;
+                            smr = *s;
+                        }
+                        yr += p.dust_level * smr * g * self.dust_peak * 0.7;
+                    } else {
+                        // mono: R comb buffer still advances coherently
+                        self.comb_buf_r[self.comb_pos] = cw_l;
+                        yr += d_l;
+                    }
+                    self.comb_pos = (self.comb_pos + 1) & 255;
                 }
             }
             // rings join the output last (kept out of every normalizer path)

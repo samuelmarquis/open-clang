@@ -54,6 +54,11 @@ pub(crate) const PARAM_GAP_VEL_ID: u32 = 36;
 pub(crate) const PARAM_RATTLE_TUNE_ID: u32 = 37;
 pub(crate) const PARAM_RATTLE_TRACK_ID: u32 = 38;
 pub(crate) const PARAM_WALK_ID: u32 = 39;
+// M9 — the wire-bed (dust promoted to a snare mechanism)
+pub(crate) const PARAM_BED_RELEASE_ID: u32 = 40;
+pub(crate) const PARAM_BED_SOURCE_ID: u32 = 41;
+pub(crate) const PARAM_BED_COMB_ID: u32 = 42;
+pub(crate) const PARAM_BED_BRIGHT_ID: u32 = 43;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -235,6 +240,12 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_RATTLE_TUNE_ID, "Rattle Tune", -24.0, 24.0, 0.0, Format::Plain),
     continuous(PARAM_RATTLE_TRACK_ID, "Rattle Track", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_WALK_ID, "Walk", 0.0, 1.0, 0.0, Format::Percent),
+    // M9 — the wire-bed (defaults reproduce the legacy dust path exactly;
+    // Bed Release lets the noise OUTLAST the tone: the snare-tail inversion)
+    continuous(PARAM_BED_RELEASE_ID, "Bed Release", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_BED_SOURCE_ID, "Bed Source", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_BED_COMB_ID, "Bed Comb", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_BED_BRIGHT_ID, "Bed Bright", 0.0, 1.0, 0.5, Format::Percent),
 ];
 
 /// The single source of truth for the parameter-store size. The
