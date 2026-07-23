@@ -100,7 +100,7 @@ shape.
   contrast) is the controlled experiment; re-run this battery on it
   before hard-coding any target numbers.
 
-## M11 design targets (measured, provisional until SD pack confirms)
+## M11 design targets (loop-derived — SUPERSEDED by the LOCKED list below)
 
 1. **Wires as resonators (Net1)** — target: ≥8 stable tonal peaks
    >6 dB prominence scattered 1–8 kHz in the tail, T60 ≈ 0.35 s,
@@ -132,3 +132,110 @@ shape.
 
 The battery (`lab/snare_autopsy.py`) is the acceptance test: M11
 renders go through the same table, next to the references.
+
+## SD pack — controlled confirmation (2026-07-24)
+
+The Superior Drummer pack arrived: four DRY drums + Halo-Feeder
+(PROCESSED — Vocodex et al. — Sam's aesthetic target, not a snare
+reference). Each file: velocity ramps × three hit positions, 17–18
+isolated hits, no bleed. Battery: `lab/sd_snares.py` (adds a
+floor-guarded T60 fit and ramp-restart position segmentation, which
+split every file cleanly into three ~6-hit ramps). Position 1 reads
+as center (f0 at base tune, max dominance margin); position 3 as
+edge/rim (f0 percept jumps to an overtone ×1.4–2.2, margin
+collapses).
+
+### Per-drum medians (all hits)
+
+| drum | f0 @ center | dominance margin @ center | tail T60 LF→8–14 k | ring n / prom | attack 0–5 ms (dB rel per band) | rise, loud hits |
+|---|---|---|---|---|---|---|
+| 4×14 Black Beauty | 218 Hz | 7.0 dB | 0.58 → 0.43 s | 15.5 / 8.6 dB | 0 / −7 / −14 / −21 / −34 | ~2 ms |
+| 5×14 Solid Aluminum | 210 Hz | 0.9 dB | 0.52 → 0.44 s | 17 / 8.4 dB | 0 / −9 / −15 / −22 / −30 | ~1.8 ms |
+| 8×14 Pear Stave | 155 Hz | 14.4 dB | 0.57 → 0.46 s | 13.5 / 8.1 dB | 0 / −10 / −14 / −21 / −32 | ~10–13 ms |
+| 8×14 Coliseum | 262 Hz | 3.3 dB | 0.58 → 0.43 s | 16 / 9.2 dB | −1 / 0 / −8 / −18 / −30 | ~2 ms |
+
+(Attack bands: 0.1–0.5 k / 0.5–1.5 k / 1.5–4 k / 4–8 k / 8–14 k.)
+
+### What the controlled data confirms, tightens, or overturns
+
+- **F2 CONFIRMED and tightened.** Dry, uncompressed: every band of
+  every drum decays in 0.39–0.63 s, with a gentle monotone droop
+  toward HF. The flat profile was not a mixing artifact. Locked:
+  ~0.55 s at LF → ~0.43 s at 8–14 k, never rising with frequency.
+- **F3 CONFIRMED and raised.** Dry close mic shows MORE ring than
+  the loops: median 13.5–17 peaks >6 dB, mean prominence 8–9 dB
+  (Coliseum edge hits reach 12 dB). Per-drum recurring mode
+  frequencies exist (Aluminum 743/1184 Hz, Pear Stave 463 Hz,
+  Coliseum 592/937 Hz — the instrument fingerprint, like WORKOUT's
+  3273 Hz). **Velocity finding: soft/ghost hits expose MORE
+  countable peaks (15–23) than loud hits (11–16)** — loud hits
+  raise the broadband wire-noise floor between the peaks. The wire
+  resonators must ring at ghost level; a noise-only ghost note can
+  never read.
+- **F4 AMENDED — the loops lied about the crack's band.** The dry
+  drum's 0–5 ms attack is LF/mid-led with a smooth monotonic HF
+  falloff (see table); the "4–8 kHz leads" observation from the
+  loops was mix EQ/compression, not the instrument. What survives:
+  the attack is spread over milliseconds — rise 1.5–2.7 ms on loud
+  hits (deep wood ~10–13 ms; soft hits 10–24 ms) — and our 50 µs
+  impulse remains convicted. The produced-brightness question moves
+  to the Halo delta below.
+- **F1 REFINED — dominance is the position axis, and material
+  scales it.** Center: 14.4 dB (deep wood), 7 dB (shallow metal),
+  0.9–3.3 dB (bright metal — a legitimate material flavor, not a
+  failure). Edge: margin ~0–3 dB everywhere, dominant peak moves to
+  the overtone. Our render's −0.1 dB *at nominal center* stays
+  convicted; the strike-position/weighting control must sweep the
+  measured center↔edge range.
+
+### The Halo-Feeder delta (the fucked-fidelity spec)
+
+Same battery on the processed file, diffed against the dry drums:
+
+| metric | dry drums | Halo-Feeder | the processing did |
+|---|---|---|---|
+| f0 | 155–280 Hz | 158 Hz | tuned/pitched LOW |
+| dominance margin @ center | 3–14 dB | **25.4 dB** | **crushed the fundamental UP** |
+| tail T60 profile | ~0.55→0.43 s flat | ~0.54–0.61 s flat | left it alone |
+| ring | 13.5–17 pk / 8–9 dB | 10 pk / 8.0 dB | slightly smoothed, ring survives |
+| tail centroid | ~920–1410 Hz | **642 Hz** | pulled energy DOWN |
+| attack (edge position) | LF-led | [−26, −9, −1, 0, −4] | LF cut, mid/HF-led crack layer |
+| rise | 2–12 ms | ~13 ms | compression stretch |
+
+The aesthetic Sam is chasing is **more fundamental, not more hiss**:
+a dry snare with its f0 dominance pushed from ~10 dB to ~25 dB, tail
+length untouched, ring intact, overall centroid pulled down, and an
+optional produced crack layer with the LF cut out of the first 5 ms.
+Every row of that column is natively reachable with mechanisms we
+planned for other reasons — floor/placement (Vocodex lesson), tilt/
+gain-lane, and the M11 crack with a band-tilt control.
+
+## M11 targets — LOCKED
+
+1. **Wire ring (Net1, the headline):** ≥12 tonal peaks >6 dB above
+   the local tail floor (mean top-10 prominence ≥8 dB), scattered
+   0.4–8 kHz, stable per instrument, **present at ghost velocity**
+   (soft hits must show ≥ as many peaks as loud). Wires = actual
+   detuned resonators in intermittent contact with R2; the noise
+   bed demotes to dust/texture.
+2. **The crack:** attack energy spread over ~2–4 ms (10–90 % rise;
+   up to ~12 ms legitimately for deep/soft), never an impulse.
+   Band profile at 0–5 ms follows the dry law by default
+   (≈ 0 / −8 / −14 / −21 / −32) with existing bright/Ex controls
+   able to tilt toward the Halo produced profile (mid/HF-led, LF
+   cut). The loops' "4–8 k leader" target is retired.
+3. **Tail T60:** flat with gentle HF droop — ~0.55 s LF → ~0.43 s
+   at 8–14 k (acceptance band 0.39–0.63 s, NEVER rising with
+   frequency). Bed Release recalibration law stands:
+   `rel_t = T60_knob·dust_follow/6.908`, knob log-mapped
+   ~0.15–1.5 s — the entire dry-snare zone lands mid-throw.
+4. **Fundamental dominance & position:** center ≥10 dB margin for
+   the wood/deep voicing (metal flavors legitimately 1–3 dB), edge
+   → overtone-dominant (~0–3 dB, f0 percept ×1.4–2.2). Our −0.1 dB
+   at center remains the conviction to overturn. The Halo spec —
+   ~25 dB margin, centroid ~640 Hz — is the *produced* extreme the
+   floor/tilt controls must reach.
+
+Acceptance: M11 renders through `lab/snare_autopsy.py` +
+`lab/sd_snares.py` aggregation, tabled next to the four dry drums
+and Halo-Feeder.
