@@ -337,6 +337,12 @@ pub struct Engine {
     exc_a_lp: f32,    // color coeffs, sr-derived at trigger
     exc_a_hp: f32,
     buck_rate0: f32,  // buckling base rate (clicks/s)
+    // buckling snap shaping: raised-cosine click cores (finite contact
+    // width) instead of single-sample deltas — the delta edge read as
+    // "digital crackle" (Sam, M8 verdict). Width rides ex_color.
+    buck_plen: usize, // snap length in samples
+    buck_ppos: usize, // position in the active snap (MAX = inactive)
+    buck_pamp: f32,   // active snap amplitude (energy-matched to old delta)
     next_click: usize,
     clicks_left: u32, // runaway backstop (cap per trigger)
     clicks_fired: u32,
@@ -433,6 +439,9 @@ impl Engine {
             exc_a_lp: 0.0,
             exc_a_hp: 0.0,
             buck_rate0: 0.0,
+            buck_plen: 0,
+            buck_ppos: usize::MAX,
+            buck_pamp: 0.0,
             next_click: 0,
             clicks_left: 0,
             clicks_fired: 0,
@@ -695,6 +704,13 @@ impl Engine {
                 self.pulse_len = 0;
                 self.pulse_pos = usize::MAX;
                 self.buck_rate0 = 30.0 * (30.0f32).powf(ext); // 30..900 /s
+                // snap width: 2.0 ms (soft crumple) -> 0.25 ms (crisp snap)
+                // across ex_color; the LP cutoff (below) rides color too, so
+                // both sharpness mechanisms agree
+                let snap_s = 0.002 * (0.125f32).powf(color);
+                self.buck_plen = ((sr * snap_s) as usize).max(4);
+                self.buck_ppos = usize::MAX;
+                self.buck_pamp = 0.0;
                 self.next_click = 0;
                 self.clicks_left = 600; // runaway backstop, never musical
                 let lp_cut = (1500.0 * (8.0f32).powf(color)).min(0.4 * sr);
@@ -1014,14 +1030,25 @@ impl Engine {
                     // strength scales sqrt(e_norm), so re-injection weakens
                     // as the bank calms — convergent, no limit cycle; the
                     // clicks_left cap is a pure backstop.
-                    let mut imp = 0.0f32;
                     if self.clicks_left > 0 {
                         if self.next_click == 0 {
                             let u = (0.5 * (self.white() + 1.0)).clamp(1e-4, 1.0);
                             let a = (u.powf(-1.0 / 1.5)).min(3.0) / 3.0; // power law
                             let drive_env =
                                 self.e_norm.max((1.0 - self.t / 0.03).max(0.0));
-                            imp = 2.0 * p.velocity * a * drive_env.sqrt();
+                            let core = 2.0 * p.velocity * a * drive_env.sqrt();
+                            // arm a raised-cosine snap, loudness-matched to
+                            // M7's delta via the force-integral (bank peak
+                            // rides integral of force): amp*plen = const,
+                            // calibrated 3.0 against M7 full-render peaks at
+                            // color 0.3/0.5/0.9 (within +/-1.6 dB at all).
+                            let amp = core * 3.0 / self.buck_plen as f32;
+                            // retrigger while active: keep the louder snap
+                            if self.buck_ppos >= self.buck_plen || amp > self.buck_pamp
+                            {
+                                self.buck_pamp = amp;
+                                self.buck_ppos = 0;
+                            }
                             self.clicks_left -= 1;
                             self.clicks_fired += 1;
                             let u2 = (0.5 * (self.white() + 1.0)).clamp(1e-3, 1.0);
@@ -1033,6 +1060,15 @@ impl Engine {
                             self.next_click -= 1;
                         }
                     }
+                    let imp = if self.buck_ppos < self.buck_plen {
+                        let ph = self.buck_ppos as f32 / self.buck_plen as f32;
+                        self.buck_ppos += 1;
+                        self.buck_pamp
+                            * 0.5
+                            * (1.0 - (2.0 * core::f32::consts::PI * ph).cos())
+                    } else {
+                        0.0
+                    };
                     // click sharpness: 3x one-pole LP (band-limited pulse;
                     // 18 dB/oct meets the >=60 dB @ 0.45 sr doctrine spec —
                     // exc_hp is unused by this exciter and serves as stage 3)
