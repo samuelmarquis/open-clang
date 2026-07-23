@@ -330,11 +330,24 @@ becomes canonical. First batches:
   EXCEED body T60: the decay inversion, tone-dies-noise-hangs),
   selectable drive source region, wire-comb shimmer, brightness,
   compressive follow. Cheapest path to "reads as snare."
-- **M10** — NESS/Net1 topology round: second head + cavity coupling
-  (the never-built R1⇄R2, per research 01 §A.2 — the literal NESS
-  snare topology; also the "hollow" percept for shells generally) +
-  Net1 rattling interconnections (satellite chains; the bar-rescue
-  vehicle).
+- **M10** — NESS topology round (BUILT 2026-07-24; scope set by the
+  M9 verdict — "MAYBE a rimshot. MAYBE."): (1) second head + cavity
+  coupling (R1⇄cavity⇄R2, research 01 §A.2): 4 cavity air modes +
+  12-mode resonant head, volume coupling via the odd×odd/(m·n) law,
+  skew-symmetric pressure exchange, every exchange normalized by the
+  receiver's dissipation (1−r) — the M10 margin law; bed source
+  graduates from proxy band to real R2 motion; params 44–47.
+  (2) **Stick exciter** — sub-ms Hertzian contact + direct contact
+  radiation ("the tick") through its own Cheby-II state: at snare
+  tunes the modal bank tops out ~1.1 kHz, so the crack must radiate
+  directly. (3) **Biquad infrastructure** — Cheby-II order 12
+  replaces the one-pole fleet: flat to 0.40·sr, −63 dB at 0.45·sr;
+  Bed Bright 1.0 now reaches 15.6 kHz. (4) Bed Release remapped
+  30 ms–0.35 s. Also: the CLI's 1.5 ms render fade-in was found to
+  have erased sub-ms attacks since batch 001 — removed.
+- **M11 (queued)** — Net1 rattling interconnections (satellite
+  chains; the bar-rescue vehicle) — deferred from M10 (the round was
+  full); plus whatever the M10 snare verdict demands.
 - **M-panel** — DEFERRED (2026-07-22): the panel waits on Sam's
   separate design-system effort (shared visual language for the
   sister plugins); re-enters the roadmap on his call. Interaction

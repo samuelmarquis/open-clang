@@ -12,7 +12,7 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 || args[0] != "render" {
-        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
+        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
     let out_path = &args[1];
     let mut p = EngineParams::default();
@@ -124,6 +124,11 @@ fn main() {
             "--bed-source" => p.bed_source = val(),
             "--bed-comb" => p.bed_comb = val(),
             "--bed-bright" => p.bed_bright = val(),
+            // M10 — cavity + resonant head
+            "--cavity" => p.cavity = val(),
+            "--cavity-tune" => p.cavity_tune = val(),
+            "--head2-tune" => p.head2_tune = val(), // semitones vs f0
+            "--head2-damp" => p.head2_damp = val(),
             "--exciter" => {
                 i += 1;
                 p.exciter = match args.get(i).map(|s| s.as_str()) {
@@ -131,7 +136,8 @@ fn main() {
                     Some("burst") => Exciter::Burst,
                     Some("buckling") => Exciter::Buckling,
                     Some("raw") => Exciter::Raw,
-                    _ => die("--exciter mallet|burst|buckling|raw"),
+                    Some("stick") => Exciter::Stick,
+                    _ => die("--exciter mallet|burst|buckling|raw|stick"),
                 };
             }
             "--ex-color" => p.ex_color = val(),
@@ -205,12 +211,12 @@ fn main() {
             *x *= g;
         }
     }
-    let n_atk = (sr * 0.0015) as usize;
-    for k in 0..n_atk.min(buf_l.len()) {
-        let ramp = k as f32 / n_atk as f32;
-        buf_l[k] *= ramp;
-        buf_r[k] *= ramp;
-    }
+    // M10: the batch-001-era 1.5 ms fade-in is GONE — it was erasing
+    // sub-ms attack transients (the Stick tick lives entirely inside
+    // it), so every CLI render under-reported the crack. The engine's
+    // exciters all start from zero (raised-cosine onsets); Raw's t=0
+    // impulse is the sound, not an artifact. The plugin path never had
+    // this ramp — renders and Live now agree about attacks.
 
     // true stereo (STEREO v1); with width/decohere at 0 the channels are
     // bit-identical, i.e. the canonical mono voice

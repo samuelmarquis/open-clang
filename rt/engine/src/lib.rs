@@ -14,6 +14,9 @@ pub const MAX_MODES: usize = 256;
 pub const MAX_SATS: usize = 4;
 pub const SAT_PARTIALS: usize = 4; // M8: partials per satellite (multi-modal)
 pub const CTRL_INTERVAL: usize = 32; // samples between coefficient updates
+pub const R2_MODES: usize = 12; // M10: resonant (snare-side) head bank
+pub const CAV_MODES: usize = 4; // M10: cavity air modes (Helmholtz + pipe)
+pub const BED_BQ: usize = 6; // M10: bed band-limit biquad sections (order 12)
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Arch {
@@ -37,6 +40,12 @@ pub enum Exciter {
     Buckling,
     /// E5 — single-sample impulse + optional soften/DC-kick tail. Clean.
     Raw,
+    /// M10 — drumstick (Sam-requested): light, stiff Hertzian contact.
+    /// Raised-cosine force pulse 0.08–0.8 ms — an order of magnitude
+    /// shorter than Mallet, so the spectrum is flat well into the kHz
+    /// range BY MECHANISM (the snap, doctrine-clean). Color = tip↔
+    /// shoulder (contact time), Time = family contact-time scale.
+    Stick,
 }
 
 /// Flat, Copy, one knob per field (template §3). The Bracing/Size macros
@@ -116,9 +125,23 @@ pub struct EngineParams {
     /// 0..1: wire-comb shimmer (short feedback comb, per-channel salted,
     /// fb < 0.9 with in-loop LP per the band-limit doctrine).
     pub bed_comb: f32,
-    /// 0..1: noise spectral center, dark (~0.7-4 kHz) to bright
-    /// (~3.3-10 kHz); 0.5 = the legacy 1.5-6.5 kHz band.
+    /// 0..1: noise spectral center, dark (~0.7-4 kHz) to bright; 0.5 =
+    /// the legacy 1.5-6.5 kHz band. M10: the top half steepens to reach
+    /// the biquad-opened top octave (1.0 ≈ 3.3-15.6 kHz).
     pub bed_bright: f32,
+    // M10 — NESS topology: batter ⇄ cavity air ⇄ resonant head (R1⇄R2,
+    // the literal snare topology; the "hollow"). 0 = fully off, bit-exact.
+    /// 0..1 coupling amount (drives cavity, R2, return reaction, and the
+    /// R2 radiation mix together).
+    pub cavity: f32,
+    /// cavity fundamental, Hz (Helmholtz-ish; pipe partials ride it).
+    pub cavity_tune: f32,
+    /// resonant-head tuning interval vs f0, semitones (snare-side heads
+    /// are typically tuned above the batter).
+    pub head2_tune: f32,
+    /// 0..1: resonant-head damping (0 = ringing head, 1 = choked/wire-
+    /// loaded; the wire-bed rides this head's motion when cavity is on).
+    pub head2_damp: f32,
     // STEREO v1 (M5): per-mode L/R decoherence. Both default 0 = the
     // canonical mono voice, bit-identical in both channels.
     /// 0..1 — per-mode L/R phase divergence (zero below 4·f0: the sub
@@ -204,6 +227,10 @@ impl Default for EngineParams {
             bed_source: 0.0,
             bed_comb: 0.0,
             bed_bright: 0.5,
+            cavity: 0.0,
+            cavity_tune: 170.0,
+            head2_tune: 7.0,
+            head2_damp: 0.5,
             decohere: 0.0,
             stereo_floor: 0.3,
             rattle_level: 0.5,
@@ -256,6 +283,11 @@ struct Mode {
     asym_k: f32, // per-mode T60 asymmetry fraction (salted, ramped)
     pgl: f32,    // mode-spread pan gains (1.0 at spread 0)
     pgr: f32,
+    // M10 — volume-coupling weight into the cavity: only odd×odd modes
+    // displace net volume (even modes cancel), weight 1/(m·n) — the
+    // physical air-coupling law for a rectangular membrane. 0 when the
+    // cavity is off.
+    cpl: f32,
 }
 
 pub struct Engine {
@@ -353,13 +385,18 @@ pub struct Engine {
     comb_dly_r: usize,
     comb_lp_l: f32,     // in-loop LP (band-limit doctrine)
     comb_lp_r: f32,
-    a_comb_lp: f32,     // ~8 kHz (new())
-    bed_sm: [f32; 6],   // bed radiation smoother 6x one-pole @9.5 kHz
-    bed_smr: [f32; 6],  // (new-path only; with ZOH noise, keeps >=60 dB gate)
-    a_bsm: f32,
-    bed_hold_l: f32,    // zero-order-hold noise (2-sample): sinc rolloff
-    bed_hold_r: f32,    // buys ~19 dB at 0.45 sr for ~3 dB at the top of
-    bed_hold_ph: bool,  // the bright band — finite wire bandwidth, honestly
+    a_comb_lp: f32,     // M10: ~12 kHz (new()); loop gain still <= fb < 1
+                        // at ALL frequencies (one-pole LP |H| <= 1, max at
+                        // DC) — stability is independent of the cutoff
+    // M10 — bed band-limit: Chebyshev-II lowpass cascade (order 12, 6
+    // TDF2 sections, static per-sr coefficients — the passivity law is
+    // about TIME-VARYING frequency; these never move). Stopband edge
+    // 0.45·sr at −63 dB; −3 dB at ~0.367·sr (16.2 kHz @ 44.1k): the
+    // top octave the M9 one-pole fleet was eating, opened. Replaces the
+    // ZOH noise core + 6×9.5 kHz smoother outright.
+    bed_bqc: [[f32; 5]; BED_BQ], // b0 b1 b2 a1 a2 per section
+    bed_bq_l: [[f32; 2]; BED_BQ],
+    bed_bq_r: [[f32; 2]; BED_BQ],
     // M8 — satellite radiation smoother (2x one-pole @10 kHz): bounce-mode
     // entry clicks are hard steps into the partial rotors; the doctrine's
     // band-limit gate demands softened edges (same lesson as buckling's
@@ -391,10 +428,101 @@ pub struct Engine {
     clicks_left: u32, // runaway backstop (cap per trigger)
     clicks_fired: u32,
     raw_tail_len: usize,
+    // M10 — Stick exciter: pulse amplitude, force-integral matched to
+    // Mallet (amp·len ≈ const) so switching exciters holds level
+    stick_amp: f32,
+    // Stick contact radiation ("the tick"): a sub-ms contact radiates
+    // audibly on its own — THE snap path, since at snare tunes the
+    // modal bank tops out near 1 kHz and can't carry the crack. Feeds
+    // the output directly (never the bank), band-limited through its
+    // own Cheby-II cascade state (shared coefficients).
+    stick_dir: f32,
+    stick_bq: [[f32; 2]; BED_BQ],
+    // M10 — cavity + resonant head (R1 ⇄ cavity ⇄ R2). All state fixed,
+    // no alloc; engaged only when p.cavity > 0 (cav_on).
+    cav_on: bool,
+    n_r2: usize,
+    r2_u: [f32; R2_MODES],
+    r2_v: [f32; R2_MODES],
+    r2_cw: [f32; R2_MODES],
+    r2_sw: [f32; R2_MODES],
+    r2_r: [f32; R2_MODES],
+    r2_cpl: [f32; R2_MODES], // volume-coupling weights (odd·odd law)
+    r2_out: [f32; R2_MODES], // listen-tap weights
+    cav_u: [f32; CAV_MODES],
+    cav_v: [f32; CAV_MODES],
+    cav_cw: [f32; CAV_MODES],
+    cav_sw: [f32; CAV_MODES],
+    cav_r: [f32; CAV_MODES],
+    cav_g: [f32; CAV_MODES],
+    cav_kc: f32,  // (x1 − x2) volume drive into the cavity
+    cav_ret: f32, // pressure reaction on the batter (mass asymmetry:
+                  // the batter is the heavy head — the return path is
+                  // deliberately weaker than the forward path, which
+                  // bounds the R1→cav→R2→cav→R1 loop gain by GEOMETRY)
+    cav_k2: f32,  // pressure force on the resonant head
+    r2_rad: f32,  // resonant-head radiation into the output
+    r2_x2out: f32, // this-sample R2 listen tap (bed source rides this)
+    // running peak of |x2| — bed-source normalizer. Its input (R2
+    // motion) is driven by exciter/cavity/batter only, NEVER by bed
+    // output: the normalizer-consumer law holds.
+    x2_peak: f32,
 }
 
 fn db_to_lin(db: f32) -> f32 {
     (10.0f32).powf(db / 20.0)
+}
+
+/// M10 — Chebyshev Type-II lowpass design for the bed band-limit gate:
+/// order 12 (6 biquad sections), stopband edge at 0.45·sr, stopband
+/// attenuation 63 dB (3 dB margin over the doctrine's 60). Flat
+/// (monotone) passband, −3 dB at ~0.367·sr — a Butterworth cascade
+/// cannot make this spec: 16 k → 19.8 k is 0.31 octave, and 60 dB in
+/// 0.31 octave is ~194 dB/oct (order ~32); the inverse-Chebyshev zeros
+/// buy it at order 12. Coefficients depend only on the 0.45 fraction,
+/// so they are sample-rate-invariant after bilinear prewarp (the corner
+/// scales with sr automatically). f64 design math, f32 runtime.
+fn bed_bq_design() -> [[f32; 5]; BED_BQ] {
+    let n = (2 * BED_BQ) as f64;
+    let a_s = 63.0f64;
+    let ws = (core::f64::consts::PI * 0.45).tan(); // prewarped stopband edge
+    let lambda = (10.0f64).powf(a_s / 20.0);
+    // eps = 1/sqrt(lambda^2 - 1); mu = asinh(1/eps)/n
+    let mu = ((lambda * lambda - 1.0).sqrt()).asinh() / n;
+    let sh = mu.sinh();
+    let ch = mu.cosh();
+    let mut out = [[0.0f32; 5]; BED_BQ];
+    for (k, sec) in out.iter_mut().enumerate() {
+        let theta = core::f64::consts::PI * (2.0 * k as f64 + 1.0) / (2.0 * n);
+        // Chebyshev-I prototype pole; Cheby-II pole is ws/p (reciprocal)
+        let pr = -sh * theta.sin();
+        let pi_ = ch * theta.cos();
+        let pm2 = pr * pr + pi_ * pi_;
+        let cr = ws * pr / pm2;
+        let ci = -ws * pi_ / pm2;
+        // zeros at ±j·ws/cos(theta): analog section (s²+c)/(s²+a1·s+a0)
+        let zi = ws / theta.cos();
+        let c = zi * zi;
+        let a1a = -2.0 * cr;
+        let a0a = cr * cr + ci * ci;
+        // bilinear s = (1−z⁻¹)/(1+z⁻¹) (prewarp folded into ws)
+        let d0 = 1.0 + a1a + a0a;
+        let b0 = (1.0 + c) / d0;
+        let b1 = (2.0 * c - 2.0) / d0;
+        let b2 = (1.0 + c) / d0;
+        let a1 = (2.0 * a0a - 2.0) / d0;
+        let a2 = (1.0 - a1a + a0a) / d0;
+        // per-section unity DC gain (product then also unity at DC)
+        let g = (1.0 + a1 + a2) / (b0 + b1 + b2);
+        *sec = [
+            (b0 * g) as f32,
+            (b1 * g) as f32,
+            (b2 * g) as f32,
+            a1 as f32,
+            a2 as f32,
+        ];
+    }
+    out
 }
 
 impl Engine {
@@ -410,8 +538,13 @@ impl Engine {
         let bed_a_atk = (-1.0 / (0.001 * sr)).exp();
         let a_src_hp = (-2.0 * core::f32::consts::PI * 150.0 / sr).exp();
         let a_src_lp = (-2.0 * core::f32::consts::PI * 800.0 / sr).exp();
-        let a_comb_lp = (-2.0 * core::f32::consts::PI * 8000.0 / sr).exp();
-        let a_bsm = (-2.0 * core::f32::consts::PI * 9_500.0 / sr).exp();
+        // M10: comb in-loop LP raised 8 k → 12 k (the biquad cascade now
+        // owns the band-limit gate; the comb'd wires get to stay bright).
+        // Loop stability proof: one-pole LP magnitude (1−a)/|1−a·e^{−jω}|
+        // peaks at DC where it is exactly 1, so loop gain ≤ fb ≤ 0.88 < 1
+        // at every frequency, for ANY cutoff.
+        let a_comb_lp =
+            (-2.0 * core::f32::consts::PI * (12_000.0f32).min(0.27 * sr) / sr).exp();
         // golden-ratio salted comb delays: 0.38 ms (L) / 0.53 ms (R)
         let comb_dly_l = ((0.00038 * sr) as usize).clamp(4, 255);
         let comb_dly_r = ((0.00053 * sr) as usize).clamp(4, 255);
@@ -494,12 +627,9 @@ impl Engine {
             comb_lp_l: 0.0,
             comb_lp_r: 0.0,
             a_comb_lp,
-            bed_sm: [0.0; 6],
-            bed_smr: [0.0; 6],
-            a_bsm,
-            bed_hold_l: 0.0,
-            bed_hold_r: 0.0,
-            bed_hold_ph: false,
+            bed_bqc: bed_bq_design(),
+            bed_bq_l: [[0.0; 2]; BED_BQ],
+            bed_bq_r: [[0.0; 2]; BED_BQ],
             sat_rad_lp1: 0.0,
             sat_rad_lp2: 0.0,
             sat_rad_lp1r: 0.0,
@@ -522,6 +652,30 @@ impl Engine {
             clicks_left: 0,
             clicks_fired: 0,
             raw_tail_len: 0,
+            stick_amp: 0.0,
+            stick_dir: 0.0,
+            stick_bq: [[0.0; 2]; BED_BQ],
+            cav_on: false,
+            n_r2: 0,
+            r2_u: [0.0; R2_MODES],
+            r2_v: [0.0; R2_MODES],
+            r2_cw: [0.0; R2_MODES],
+            r2_sw: [0.0; R2_MODES],
+            r2_r: [0.0; R2_MODES],
+            r2_cpl: [0.0; R2_MODES],
+            r2_out: [0.0; R2_MODES],
+            cav_u: [0.0; CAV_MODES],
+            cav_v: [0.0; CAV_MODES],
+            cav_cw: [0.0; CAV_MODES],
+            cav_sw: [0.0; CAV_MODES],
+            cav_r: [0.0; CAV_MODES],
+            cav_g: [0.0; CAV_MODES],
+            cav_kc: 0.0,
+            cav_ret: 0.0,
+            cav_k2: 0.0,
+            r2_rad: 0.0,
+            r2_x2out: 0.0,
+            x2_peak: 1e-9,
         }
     }
 
@@ -559,6 +713,10 @@ impl Engine {
             m.u2 = 0.0;
             m.v2 = 0.0;
         }
+        self.cav_u = [0.0; CAV_MODES];
+        self.cav_v = [0.0; CAV_MODES];
+        self.r2_u = [0.0; R2_MODES];
+        self.r2_v = [0.0; R2_MODES];
         self.pulse_pos = usize::MAX;
         self.active = false;
     }
@@ -741,6 +899,14 @@ impl Engine {
             }
             m.ur = 0.0;
             m.vr = 0.0;
+            // M10 — cavity volume-coupling weight: only odd×odd modes
+            // displace net volume (even halves cancel); weight 1/(m·n).
+            let (mi_o, ni_o) = (m.mi as u32 % 2 == 1, m.ni as u32 % 2 == 1);
+            m.cpl = if mi_o && ni_o {
+                1.0 / (m.mi * m.ni).max(1.0)
+            } else {
+                0.0
+            };
         }
         self.detuned = p.decohere > 0.0 || p.damp_asym > 0.0;
         self.update_coeffs(1.0);
@@ -799,6 +965,45 @@ impl Engine {
                 self.clicks_left = 0;
                 let lp_cut = (500.0 * (40.0f32).powf(color)).min(0.45 * sr);
                 self.exc_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
+            }
+            Exciter::Stick => {
+                // light stiff stick: raised-cosine Hertzian contact,
+                // 0.8 ms (shoulder, color 0) → 0.08 ms (tip, color 1),
+                // × the family 4^(0.5−t) time scale, × v^−0.2 (Hertz:
+                // harder hits stiffen the contact slightly). Floor 4
+                // samples: band-limited by construction (a 4-sample
+                // raised cosine is already ~−32 dB at 0.45·sr, and the
+                // spectral peak of any full render sits at the body
+                // resonance far above the pulse's top edge — measured
+                // at the QC gate like every exciter).
+                let tau = 0.0008
+                    * (0.1f32).powf(color)
+                    * (4.0f32).powf(0.5 - ext)
+                    * (p.velocity.max(0.05) / 0.8).powf(-0.2);
+                self.pulse_len = ((sr * tau) as usize).max(4);
+                self.pulse_pos = 0;
+                self.clicks_left = 0;
+                // force-integral loudness match vs Mallet (the buckling
+                // calibration law: bank peak rides ∫F dt for modes with
+                // period ≫ contact time — amp·len ≈ const). n_mallet is
+                // the pulse Mallet would arm on this same patch at
+                // neutral color/time; ratio capped 40 (tip extremes).
+                let stiff_eq =
+                    (p.stiffness + 0.30 * p.brace_coupling).clamp(0.0, 1.0);
+                let n_mallet = (sr * 0.004 * (1.0 - 0.75 * stiff_eq)
+                    / (0.35 + 0.65 * p.velocity))
+                    .max(8.0);
+                // 0.28: empirical trim on top of the integral law — short
+                // pulses drive mid modes more efficiently than the law
+                // assumes (the mallet's own spectrum already rolls off
+                // there). Calibrated against full-render peaks at color
+                // 0.3/0.5/0.9: within ±0.7 dB of Mallet at all three.
+                self.stick_amp =
+                    p.velocity * (n_mallet / self.pulse_len as f32).min(40.0) * 0.28;
+                // contact radiation gain (the tick/crack); rides color —
+                // tip contacts click harder than shoulder contacts
+                self.stick_dir = 1.6 + 2.8 * color;
+                self.stick_bq = [[0.0; 2]; BED_BQ];
             }
         }
         self.glide_r2 = (2.0f32).powf(p.glide_st / 6.0);
@@ -933,8 +1138,10 @@ impl Engine {
         // M9 wire-bed: param-dependent coefficients + state reset
         {
             let sr = self.sr;
-            // release 30 ms -> 2.5 s, log across bed_release
-            let rel_t = 0.030 * (83.333f32).powf(p.bed_release.clamp(0.0, 1.0));
+            // M10 remap: 30 ms → 0.35 s log — the full knob now spans
+            // what was the bottom 40% (Sam, M9 verdict: "couldn't see
+            // myself pushing this past about 40%"). Pre-1.0 break.
+            let rel_t = 0.030 * (11.667f32).powf(p.bed_release.clamp(0.0, 1.0));
             self.bed_a_rel = (-1.0 / (rel_t * sr)).exp();
             // brightness: 0.5 = the exact legacy band (bit-identity)
             let b = p.bed_bright.clamp(0.0, 1.0);
@@ -943,7 +1150,11 @@ impl Engine {
                 self.bed_a_lp = self.a_lp;
             } else {
                 let hp_cut = 1500.0 * (2.2f32).powf(2.0 * b - 1.0);
-                let lp_cut = 6500.0 * (1.55f32).powf(2.0 * b - 1.0);
+                // M10: dark half keeps the M9 law; the top half steepens
+                // to reach the biquad-opened octave (b=1 → 15.6 kHz)
+                let lp_fac: f32 = if b <= 0.5 { 1.55 } else { 2.4 };
+                let lp_cut =
+                    (6500.0 * lp_fac.powf(2.0 * b - 1.0)).min(0.42 * sr);
                 self.bed_a_hp = (-2.0 * core::f32::consts::PI * hp_cut / sr).exp();
                 self.bed_a_lp = (-2.0 * core::f32::consts::PI * lp_cut / sr).exp();
             }
@@ -955,11 +1166,102 @@ impl Engine {
             self.comb_pos = 0;
             self.comb_lp_l = 0.0;
             self.comb_lp_r = 0.0;
-            self.bed_sm = [0.0; 6];
-            self.bed_smr = [0.0; 6];
-            self.bed_hold_l = 0.0;
-            self.bed_hold_r = 0.0;
-            self.bed_hold_ph = false;
+            self.bed_bq_l = [[0.0; 2]; BED_BQ];
+            self.bed_bq_r = [[0.0; 2]; BED_BQ];
+        }
+        // M10 — cavity + resonant head arming (R1 ⇄ cavity ⇄ R2).
+        // cavity = 0 → topology fully off, zero per-sample cost, output
+        // bit-exact vs pre-M10.
+        self.cav_on = p.cavity > 0.0;
+        if self.cav_on {
+            let sr = self.sr;
+            let cv = p.cavity.clamp(0.0, 1.0);
+            // cavity air: Helmholtz-ish fundamental + inharmonic pipe
+            // partials of the shell (slightly detuned from integer so
+            // the hollow doesn't read as a pitched tube)
+            let cav_ratios = [1.0f32, 2.02, 2.94, 3.83];
+            let cav_t60 = [0.30f32, 0.14, 0.09, 0.06];
+            let cav_gain = [1.0f32, 0.55, 0.38, 0.26];
+            let fc0 = p.cavity_tune.clamp(30.0, 1200.0);
+            for j in 0..CAV_MODES {
+                let f = (fc0 * cav_ratios[j]).min(0.45 * sr);
+                let w = 2.0 * core::f32::consts::PI * f / sr;
+                self.cav_cw[j] = w.cos();
+                self.cav_sw[j] = w.sin();
+                self.cav_r[j] = (-6.9078 / (cav_t60[j] * sr)).exp();
+                self.cav_g[j] = cav_gain[j];
+                self.cav_u[j] = 0.0;
+                self.cav_v[j] = 0.0;
+            }
+            // resonant head R2: a light 3×4 membrane at f0·2^(st/12),
+            // damping knob spans ringing (~0.56 s lows) → choked (60 ms)
+            let f02 = (p.f0 * (2.0f32).powf(p.head2_tune.clamp(-24.0, 24.0) / 12.0))
+                .clamp(20.0, 2000.0);
+            let damp = p.head2_damp.clamp(0.0, 1.0);
+            let aspect = 0.94f32;
+            let base2 = (1.0 + aspect * aspect).sqrt();
+            let mut q = 0usize;
+            for mi in 1..=3u32 {
+                for ni in 1..=4u32 {
+                    if q >= R2_MODES {
+                        break;
+                    }
+                    let (mf, nf) = (mi as f32, ni as f32);
+                    let fr = f02
+                        * (mf * mf + (aspect * nf) * (aspect * nf)).sqrt()
+                        / base2;
+                    if fr >= 0.45 * sr {
+                        continue;
+                    }
+                    let w = 2.0 * core::f32::consts::PI * fr / sr;
+                    self.r2_cw[q] = w.cos();
+                    self.r2_sw[q] = w.sin();
+                    let t60_2 = ((0.06 + 0.5 * (1.0 - damp))
+                        / (1.0 + (fr / 900.0).powf(1.3)))
+                    .max(1e-3);
+                    self.r2_r[q] = (-6.9078 / (t60_2 * sr)).exp();
+                    // volume coupling: odd×odd only (same law as R1)
+                    self.r2_cpl[q] = if mi % 2 == 1 && ni % 2 == 1 {
+                        1.0 / (mf * nf)
+                    } else {
+                        0.0
+                    };
+                    // listen tap: fixed off-center point (0.35/0.29)
+                    self.r2_out[q] = ((mf * core::f32::consts::PI * 0.35).sin()
+                        * (nf * core::f32::consts::PI * 0.29).sin())
+                    .abs()
+                        + 0.01;
+                    self.r2_u[q] = 0.0;
+                    self.r2_v[q] = 0.0;
+                    q += 1;
+                }
+            }
+            self.n_r2 = q;
+            // Coupling gains — the M10 margin law, learned the loud way
+            // (first constants blew up to 1.8e38): a resonator driven
+            // per-sample accumulates with gain 1/(1−r) at resonance
+            // (~10³ for these T60s), so raw displacement→force coupling
+            // multiplies THOUSANDS into every loop. Every exchange is
+            // therefore normalized by the RECEIVER's per-sample
+            // dissipation (1−r) — the resonant accumulation cancels
+            // exactly, and the worst-case (frequency-coincident) loop
+            // gain collapses to the product of the dimensionless
+            // constants below: R2⇄cav 0.6·0.6 = 0.36, R1⇄cav
+            // 0.6·0.12·cv² ≤ 0.072. Bounded by geometry (mass
+            // asymmetry: the batter is the heavy head), no clamps.
+            // Side effect, also physical: a longer-T60 cavity rings
+            // LONGER, not louder.
+            self.cav_kc = 0.6 * cv;
+            self.cav_ret = 0.12 * cv;
+            self.cav_k2 = 0.6;
+            // radiation sits OUTSIDE every loop (pure output mix), so
+            // it may be large without any stability cost: it undoes the
+            // two (1−r) normalizations the forward chain paid.
+            // Calibrated: R2 radiation ≈ −10 dB vs the body on the
+            // snare recipe at cavity 1.0.
+            self.r2_rad = 4000.0;
+            self.r2_x2out = 0.0;
+            self.x2_peak = 1e-9;
         }
         self.active = true;
     }
@@ -1186,6 +1488,19 @@ impl Engine {
                     self.exc_hp = self.exc_a_lp * self.exc_hp
                         + (1.0 - self.exc_a_lp) * self.exc_lp2;
                     3.6 * self.exc_hp
+                }
+                Exciter::Stick => {
+                    // the snap: a sub-ms raised-cosine contact pulse —
+                    // broadband through mechanism (short contact), zero
+                    // waveshaping, level-matched via the force integral
+                    if self.pulse_pos < self.pulse_len {
+                        let ph = core::f32::consts::PI * 2.0 * self.pulse_pos as f32
+                            / self.pulse_len as f32;
+                        self.pulse_pos += 1;
+                        self.stick_amp * (0.5 - 0.5 * ph.cos())
+                    } else {
+                        0.0
+                    }
                 }
                 Exciter::Raw => {
                     let mut f = 0.0f32;
@@ -1451,6 +1766,32 @@ impl Engine {
                 0.0
             };
 
+            // M10 — cavity taps, from PREVIOUS-sample states (same
+            // convention as the satellite seats): x1 = batter net-volume
+            // displacement, x2 = resonant-head dito, cav_p = cavity
+            // pressure. Physics: adiabatic compression p ∝ (x1 − x2)
+            // through the cavity resonators; F_batter = −p, F_R2 = +p —
+            // the skew-symmetric exchange (energy moves, none is minted).
+            let (cav_p, cav_dx) = if self.cav_on {
+                let mut x1 = 0.0f32;
+                for m in self.modes[..nm].iter() {
+                    if m.cpl > 0.0 {
+                        x1 += m.cpl * m.u;
+                    }
+                }
+                let mut x2 = 0.0f32;
+                let mut pr = 0.0f32;
+                for q in 0..self.n_r2 {
+                    x2 += self.r2_cpl[q] * self.r2_u[q];
+                }
+                for j in 0..CAV_MODES {
+                    pr += self.cav_g[j] * self.cav_u[j];
+                }
+                (pr, x1 - x2)
+            } else {
+                (0.0, 0.0)
+            };
+
             let mut yl = 0.0f32;
             let mut yr = 0.0f32;
             // rings accumulate SEPARATELY and join after the peak tracker:
@@ -1473,8 +1814,13 @@ impl Engine {
             let n_sats = self.n_sats;
             let sat_w = &self.sat_w;
             let detuned = self.detuned;
+            let cav_ret = self.cav_ret;
             for (k, m) in self.modes[..nm].iter_mut().enumerate() {
-                let base_drive = m.amp * f_in + m.inj * casc_noise;
+                // M10: cavity pressure reacts on the batter (−p, the
+                // heavy-head side of the skew-symmetric pair), ×(1−r):
+                // the receiver-dissipation normalization (see trigger)
+                let base_drive = m.amp * f_in + m.inj * casc_noise
+                    - cav_ret * cav_p * m.cpl * (1.0 - m.r);
                 let mut drive = base_drive;
                 for j in 0..n_sats {
                     drive -= sat_react[j] * sat_w[j][k];
@@ -1520,6 +1866,81 @@ impl Engine {
                 // mode spread: equal-power pan (1.0/1.0 at spread 0)
                 yl += cl * m.pgl;
                 yr += cr * m.pgr;
+            }
+            // M10 — Stick contact radiation: the band-limited pulse
+            // itself joins the output (the tick every real stick makes;
+            // the mallet's 3 ms thud has no audible direct term). Runs
+            // through its own Cheby-II cascade — a 4-sample raised
+            // cosine is only ~−32 dB at 0.45·sr on its own; the cascade
+            // takes the gate to spec. Joins before the peak trackers:
+            // the wires HEAR the crack (bed attack sharpens, honestly).
+            if p.exciter == Exciter::Stick && self.stick_dir > 0.0 {
+                let mut d = self.stick_dir * f_in;
+                for (c, st) in self.bed_bqc.iter().zip(self.stick_bq.iter_mut()) {
+                    let y = c[0] * d + st[0];
+                    st[0] = c[1] * d - c[3] * y + st[1];
+                    st[1] = c[2] * d - c[4] * y;
+                    d = y;
+                }
+                yl += d;
+                yr += d;
+            }
+            // M10 — cavity + resonant-head update. Cavity rotors are
+            // driven by the volume change (x1 − x2); R2 by +p. Radiation
+            // joins BEFORE the peak trackers (R2 never consumes a
+            // normalizer that includes it — the normalizer law holds).
+            if self.cav_on {
+                // every injection ×(1−r): the receiver's dissipation
+                // normalizes away its own resonant gain (the M10 law)
+                let inj = self.cav_kc * cav_dx;
+                for j in 0..CAV_MODES {
+                    let u = self.cav_r[j]
+                        * (self.cav_u[j] * self.cav_cw[j]
+                            - self.cav_v[j] * self.cav_sw[j])
+                        + inj * self.cav_g[j] * (1.0 - self.cav_r[j]);
+                    let v = self.cav_r[j]
+                        * (self.cav_u[j] * self.cav_sw[j]
+                            + self.cav_v[j] * self.cav_cw[j]);
+                    self.cav_u[j] = u;
+                    self.cav_v[j] = v;
+                }
+                let f2 = self.cav_k2 * cav_p;
+                let mut x2o = 0.0f32;
+                for q in 0..self.n_r2 {
+                    let u = self.r2_r[q]
+                        * (self.r2_u[q] * self.r2_cw[q]
+                            - self.r2_v[q] * self.r2_sw[q])
+                        + f2 * self.r2_cpl[q] * (1.0 - self.r2_r[q]);
+                    let v = self.r2_r[q]
+                        * (self.r2_u[q] * self.r2_sw[q]
+                            + self.r2_v[q] * self.r2_cw[q]);
+                    self.r2_u[q] = u;
+                    self.r2_v[q] = v;
+                    x2o += self.r2_out[q] * u;
+                }
+                // finite tripwire (passivity insurance under fuzz):
+                // a non-finite cavity/head resets silently
+                if !x2o.is_finite() {
+                    self.cav_u = [0.0; CAV_MODES];
+                    self.cav_v = [0.0; CAV_MODES];
+                    self.r2_u = [0.0; R2_MODES];
+                    self.r2_v = [0.0; R2_MODES];
+                    x2o = 0.0;
+                }
+                self.r2_x2out = x2o;
+                self.x2_peak = self.x2_peak.max(x2o.abs());
+                // radiation GAIN capped at 0.7× the bank running peak:
+                // frequency-coincident patches (body tuned onto the
+                // cavity) otherwise radiate ~+20 dB over typical. A gain
+                // min, not a waveshaper; x2_peak's input never contains
+                // this output, and rad ≤ 0.7·dust_peak can never run the
+                // shared tracker away (the satellite-normalizer pattern).
+                let g_rad = self
+                    .r2_rad
+                    .min(0.7 * self.dust_peak / self.x2_peak.max(1e-12));
+                let rad = g_rad * x2o;
+                yl += rad;
+                yr += rad;
             }
             // shared bank-peak tracker (rattle + dust normalizers) — L side,
             // matching the mono lineage. Rings join LAST (after dust): they
@@ -1619,8 +2040,23 @@ impl Engine {
                     let src_hp = yl - self.bed_src_s1;
                     self.bed_src_s2 =
                         self.a_src_lp * self.bed_src_s2 + (1.0 - self.a_src_lp) * src_hp;
-                    let src = (1.0 - p.bed_source) * yl.abs()
-                        + p.bed_source * self.bed_src_s2.abs() * 2.0;
+                    // M10 — bed source GRADUATES: with the cavity on, the
+                    // source region crossfades from the 150–800 Hz proxy
+                    // band toward REAL resonant-head motion (normalized
+                    // by its own running peak, rescaled to bank units by
+                    // dust_peak — neither normalizer sees bed output).
+                    let src_prox = self.bed_src_s2.abs() * 2.0;
+                    let src_reg = if self.cav_on {
+                        let cvm = p.cavity.clamp(0.0, 1.0);
+                        let real = self.r2_x2out.abs() / self.x2_peak.max(1e-9)
+                            * self.dust_peak
+                            * 1.4;
+                        (1.0 - cvm) * src_prox + cvm * real
+                    } else {
+                        src_prox
+                    };
+                    let src =
+                        (1.0 - p.bed_source) * yl.abs() + p.bed_source * src_reg;
                     // attack/release follower: 1 ms up, bed_release down —
                     // release may exceed body T60 (the decay inversion)
                     if src > self.bed_env {
@@ -1638,17 +2074,11 @@ impl Engine {
                     let a_hp = self.bed_a_hp;
                     let a_lp = self.bed_a_lp;
                     let fb = 0.88 * p.bed_comb;
-                    // ZOH noise: hold white for 2 samples (sinc rolloff —
-                    // the cheap 19 dB toward the band-limit gate)
-                    if !self.bed_hold_ph {
-                        self.bed_hold_l = self.white();
-                        if stereo {
-                            self.bed_hold_r = self.white();
-                        }
-                    }
-                    self.bed_hold_ph = !self.bed_hold_ph;
-                    // L chain: bright-banded noise -> wire comb -> smoother
-                    let w = self.bed_hold_l;
+                    // M10: plain per-sample white — the Cheby-II cascade
+                    // below owns the band-limit gate now; the M9 ZOH core
+                    // (and its sinc shelf over the top octave) is gone.
+                    // L chain: bright-banded noise -> wire comb -> biquads
+                    let w = self.white();
                     self.dust_lp1 = a_hp * self.dust_lp1 + (1.0 - a_hp) * w;
                     let hp = w - self.dust_lp1;
                     self.dust_lp2 = a_lp * self.dust_lp2 + (1.0 - a_lp) * hp;
@@ -1660,14 +2090,16 @@ impl Engine {
                     self.comb_buf_l[self.comb_pos] = cw_l;
                     let shaped_l = (1.0 - p.bed_comb) * self.dust_lp2 + p.bed_comb * cw_l;
                     let mut sm = shaped_l;
-                    for s in self.bed_sm.iter_mut() {
-                        *s = self.a_bsm * *s + (1.0 - self.a_bsm) * sm;
-                        sm = *s;
+                    for (c, st) in self.bed_bqc.iter().zip(self.bed_bq_l.iter_mut()) {
+                        let y = c[0] * sm + st[0];
+                        st[0] = c[1] * sm - c[3] * y + st[1];
+                        st[1] = c[2] * sm - c[4] * y;
+                        sm = y;
                     }
                     let d_l = p.dust_level * sm * g * self.dust_peak * 0.7;
                     yl += d_l;
                     if stereo {
-                        let w2 = self.bed_hold_r;
+                        let w2 = self.white();
                         self.dust_lp1r = a_hp * self.dust_lp1r + (1.0 - a_hp) * w2;
                         let hp2 = w2 - self.dust_lp1r;
                         self.dust_lp2r = a_lp * self.dust_lp2r + (1.0 - a_lp) * hp2;
@@ -1680,9 +2112,11 @@ impl Engine {
                         let shaped_r =
                             (1.0 - p.bed_comb) * self.dust_lp2r + p.bed_comb * cw_r;
                         let mut smr = shaped_r;
-                        for s in self.bed_smr.iter_mut() {
-                            *s = self.a_bsm * *s + (1.0 - self.a_bsm) * smr;
-                            smr = *s;
+                        for (c, st) in self.bed_bqc.iter().zip(self.bed_bq_r.iter_mut()) {
+                            let y = c[0] * smr + st[0];
+                            st[0] = c[1] * smr - c[3] * y + st[1];
+                            st[1] = c[2] * smr - c[4] * y;
+                            smr = y;
                         }
                         yr += p.dust_level * smr * g * self.dust_peak * 0.7;
                     } else {

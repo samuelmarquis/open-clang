@@ -59,6 +59,14 @@ pub(crate) const PARAM_BED_RELEASE_ID: u32 = 40;
 pub(crate) const PARAM_BED_SOURCE_ID: u32 = 41;
 pub(crate) const PARAM_BED_COMB_ID: u32 = 42;
 pub(crate) const PARAM_BED_BRIGHT_ID: u32 = 43;
+// M10 — NESS topology: cavity + resonant head (one batched drop,
+// 2026-07-24). Also in this drop, pre-1.0 breaking changes: Bed Release
+// remapped 30 ms–0.35 s (was –2.5 s; the knob's top 60% was dead per
+// Sam's M9 verdict), and the Exciter enum grew "Stick" (range change).
+pub(crate) const PARAM_CAVITY_ID: u32 = 44;
+pub(crate) const PARAM_CAVITY_TUNE_ID: u32 = 45;
+pub(crate) const PARAM_HEAD2_TUNE_ID: u32 = 46;
+pub(crate) const PARAM_HEAD2_DAMP_ID: u32 = 47;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -185,7 +193,8 @@ const fn bypass(id: u32) -> ParameterSpec {
 
 pub(crate) const ARCH_NAMES: &[&str] = &["Membrane", "Plate", "Bar"];
 pub(crate) const SATS_NAMES: &[&str] = &["None", "Wires", "Loose", "Trash"];
-pub(crate) const EXCITER_NAMES: &[&str] = &["Mallet", "Burst", "Buckling", "Raw"];
+pub(crate) const EXCITER_NAMES: &[&str] =
+    &["Mallet", "Burst", "Buckling", "Raw", "Stick"];
 const OFF_ON: &[&str] = &["Off", "On"];
 
 const PARAM_SPECS: &[ParameterSpec] = &[
@@ -246,6 +255,12 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_BED_SOURCE_ID, "Bed Source", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_BED_COMB_ID, "Bed Comb", 0.0, 1.0, 0.0, Format::Percent),
     continuous(PARAM_BED_BRIGHT_ID, "Bed Bright", 0.0, 1.0, 0.5, Format::Percent),
+    // M10 — the NESS topology (batter ⇄ cavity air ⇄ resonant head; the
+    // "hollow under the crack"). Cavity 0 = topology off, bit-exact.
+    continuous(PARAM_CAVITY_ID, "Cavity", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_CAVITY_TUNE_ID, "Cavity Tune", 50.0, 800.0, 170.0, Format::Hertz),
+    continuous(PARAM_HEAD2_TUNE_ID, "Head2 Tune", -12.0, 12.0, 7.0, Format::Semitones),
+    continuous(PARAM_HEAD2_DAMP_ID, "Head2 Damp", 0.0, 1.0, 0.5, Format::Percent),
 ];
 
 /// The single source of truth for the parameter-store size. The

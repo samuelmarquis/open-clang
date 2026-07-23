@@ -23,6 +23,7 @@ use crate::plugin::{
     PARAM_EX_TIME_ID, PARAM_RATTLE_CASC_ID, PARAM_BOUNCE_ID, PARAM_RATTLE_GAP_ID,
     PARAM_GAP_VEL_ID, PARAM_RATTLE_TUNE_ID, PARAM_RATTLE_TRACK_ID, PARAM_WALK_ID,
     PARAM_BED_RELEASE_ID, PARAM_BED_SOURCE_ID, PARAM_BED_COMB_ID, PARAM_BED_BRIGHT_ID,
+    PARAM_CAVITY_ID, PARAM_CAVITY_TUNE_ID, PARAM_HEAD2_TUNE_ID, PARAM_HEAD2_DAMP_ID,
     param_clamp,
     param_default, param_exists,
 };
@@ -187,6 +188,7 @@ impl SharedState {
                 1 => Exciter::Burst,
                 2 => Exciter::Buckling,
                 3 => Exciter::Raw,
+                4 => Exciter::Stick,
                 _ => Exciter::Mallet,
             },
             ex_color: self.v(PARAM_EX_COLOR_ID),
@@ -197,6 +199,10 @@ impl SharedState {
             bed_source: self.v(PARAM_BED_SOURCE_ID),
             bed_comb: self.v(PARAM_BED_COMB_ID),
             bed_bright: self.v(PARAM_BED_BRIGHT_ID),
+            cavity: self.v(PARAM_CAVITY_ID),
+            cavity_tune: self.v(PARAM_CAVITY_TUNE_ID),
+            head2_tune: self.v(PARAM_HEAD2_TUNE_ID),
+            head2_damp: self.v(PARAM_HEAD2_DAMP_ID),
             ..EngineParams::default()
         };
         apply_brace_macro(&mut p, self.v(PARAM_BRACE_ID));
@@ -279,6 +285,52 @@ mod tests {
                 "WEDGE reproduced at cycle {cycle}"
             );
         }
+    }
+
+    /// M10 gate: the cavity topology must (a) be audible through the
+    /// host path, and (b) DECAY — coupled bidirectional banks are where
+    /// limit cycles live (the satellite-drone lesson). Worst case is
+    /// frequency coincidence: body tuned onto the cavity, ringing head.
+    #[test]
+    fn cavity_reaches_engine_and_decays() {
+        let sr = 44100.0f32;
+        let render = |cav: f32| -> Vec<f32> {
+            let s = SharedState::new();
+            s.set_parameter_value(PARAM_CAVITY_ID, cav as f64).unwrap();
+            s.set_parameter_value(PARAM_CAVITY_TUNE_ID, 170.0).unwrap();
+            s.set_parameter_value(PARAM_HEAD2_TUNE_ID, 0.0).unwrap();
+            s.set_parameter_value(PARAM_HEAD2_DAMP_ID, 0.0).unwrap();
+            s.set_parameter_value(super::super::plugin::PARAM_TUNE_ID as u32, 170.0)
+                .unwrap();
+            let p = s.engine_params_for_note(60, 0.95);
+            assert!((p.cavity - cav).abs() < 1e-6, "cavity lost: {}", p.cavity);
+            let mut e = clg_engine::Engine::new(sr);
+            e.trigger(&p);
+            let mut out = vec![0.0f32; (sr * 6.0) as usize];
+            let mut r = [0.0f32; 256];
+            for c in out.chunks_mut(256) {
+                let n = c.len();
+                e.process(c, &mut r[..n]);
+            }
+            out
+        };
+        let off = render(0.0);
+        let on = render(1.0);
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let d: Vec<f32> = on.iter().zip(&off).map(|(a, b)| a - b).collect();
+        assert!(
+            rms(&d) > rms(&off) * 0.01,
+            "cavity 1.0 inaudible through the host path"
+        );
+        // decay gate: last 0.5 s must sit >=40 dB under the first 0.5 s
+        let n5 = (sr * 0.5) as usize;
+        let head = rms(&on[..n5]);
+        let tail = rms(&on[on.len() - n5..]);
+        assert!(
+            tail < head * 0.01,
+            "cavity limit cycle: head {head} tail {tail}"
+        );
+        assert!(on.iter().all(|x| x.is_finite()));
     }
 
     #[test]

@@ -50,13 +50,26 @@ and `PATHS-NOT-TAKEN.md`.
   (per-sample finiteness under full param fuzz, 8 voices) catches in
   0.6 s what black-box clap-validator takes 45 s to hang on — run it
   before every install.
+- **Coupled-bank exchanges: normalize by the receiver's dissipation
+  (1−r)** — a per-sample-driven resonator accumulates with gain
+  1/(1−r) ≈ 10³ at resonance, so raw displacement→force coupling
+  multiplies thousands into every loop (M10 cavity blew up to 1.8e38).
+  Normalized, the loop gain is just the product of the dimensionless
+  coupling constants — boundable by geometry.
+- **QC paths must be bit-honest about transients** — the CLI's 1.5 ms
+  render fade-in silently erased sub-ms attacks from batch 001
+  through M9 (the Stick tick was in the plugin but not the renders).
+  Never let a measurement/render path post-process what the plugin
+  ships.
 
-## Current state (2026-07-22)
+## Current state (2026-07-24)
 
 Instrument installed (CLAP/VST3/AU, `aumu`/`Clg1`/`Oclg`), params
-0–32 dense, engine = `rt/engine` (canonical since M3 parity; Python
-`lab/` frozen). Deferred/queued: panel (waits on Sam's external
-design system), Alignment articulator (post-panel, drawable curves),
-satellite redesign (cascade-coupling headline), effect mode
+0–47 dense, engine = `rt/engine` (canonical since M3 parity; Python
+`lab/` frozen). M10 (NESS: cavity+second head, Stick exciter, biquad
+band-limit) built, snare verdict pending (out/snare-v2). Queued: M11
+Net1 rattling interconnections (deferred from M10). Deferred: panel
+(waits on Sam's external design system; drawable graph lanes incl.
+decay-law curve), Alignment articulator (post-panel), effect mode
 (sidechain vs separate plugin, undecided), presets (Sam's friends,
 post-panel), MPE/choke (designed, post-panel).

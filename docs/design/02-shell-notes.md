@@ -323,3 +323,43 @@ non-finite output — reproduced by `state::tests::
 param_fuzz_stress_host_path`, now a permanent per-sample-finiteness
 gate); clap-validator 18/18 non-skipped 0 warnings; auval SUCCEEDED;
 defaults regression bit-identical.
+
+## M9 — the wire-bed (2026-07-23)
+
+Params 40–43: Bed Release / Bed Source / Bed Comb / Bed Bright.
+Table dense 0–43. All-defaults = legacy dust path bit-exact. Dust
+promoted to a snare mechanism: dedicated 1 ms attack / 30 ms–2.5 s
+release follower (release may exceed body T60 — the decay
+inversion), source-region crossfade full-band → 150–800 Hz proxy,
+per-channel salted wire comb (fb ≤ 0.88, in-loop LP), brightness
+band. Band-limit held via ZOH noise core + 6×9.5 kHz one-pole
+smoother — the doctrine's price: the top octave was shelved
+(convicted by ear in the M9 verdict; fixed in M10).
+
+## M10 — the NESS round (2026-07-24)
+
+Params 44–47 (one batched drop): Cavity, Cavity Tune (Hz), Head2
+Tune (st vs f0), Head2 Damp. Table dense 0–47. TWO pre-1.0 breaking
+changes in the same drop (Ableton-cache law): Exciter enum grew
+"Stick" (range change on id 30, max 3→4), and Bed Release (id 40)
+remapped 30 ms–0.35 s (was –2.5 s; top 60% of the old knob was dead
+per Sam). Regression: defaults + legacy-dust patch bit-exact; the M9
+recipe render changes BY DESIGN (Cheby-II order-12 cascade replaces
+the ZOH + one-pole bed smoother — flat to 0.40·sr, −63 dB at
+0.45·sr; measured −69.9/−71.4 dB rel peak at the maximal corner,
+44.1/48k).
+
+Laws earned: (1) **coupled-bank exchanges must be normalized by the
+receiver's per-sample dissipation (1−r)** — a per-sample-driven
+resonator accumulates 1/(1−r) ≈ 10³ at resonance; raw
+displacement→force coupling blew up to 1.8e38 before normalization
+collapsed the loop gain to the product of the dimensionless coupling
+constants (0.36 / 0.072). (2) The CLI's 1.5 ms render fade-in had
+been erasing sub-ms attacks since batch 001 (the Stick tick was
+inaudible in renders while fully present in the plugin path) —
+removed; QC renders must be bit-honest about transients.
+
+Validation: fuzz 5/5 (auto-covers 44–47 + the 5-way exciter), new
+gate `cavity_reaches_engine_and_decays` (audibility + no-limit-cycle
+at frequency coincidence), install 12/12, clap-validator 18/18
+non-skipped 0 warnings ×3, auval SUCCEEDED.
