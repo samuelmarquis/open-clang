@@ -109,10 +109,23 @@ shape.
 2. **The crack** — attack energy spread over 2–4 ms, band leader
    4–8 kHz through the first 20 ms (wire-throw microburst at
    impact); the 50 µs tick alone is convicted.
-3. **HF tail discipline** — find why the render's 8–14 kHz T60 is
-   1.3–1.45 s (bed release 0.6 ≈ 230 ms cannot explain it — suspects:
-   comb feedback ring, satellites, cascade shelf, dust follower) and
-   bring the full-band tail profile to ~0.3–0.5 s flat.
+3. **HF tail discipline** — SOLVED by ablation (M10.5 diagnosis,
+   `out/diag-hfhang/`, `lab/hf_hang.py`): the wire-bed release
+   follower alone; every other suspect (comb, satellites, cavity,
+   cascade, decohere, exciter) moves the hang <0.1 s, and with the
+   bed off the residual 8–14 k content sits at −123 dBFS. The knob
+   is calibrated in exponential time-constant units τ, but the ear
+   hears **T60 ≈ 6.91·τ/dust_follow** (−60 dB = ln(1000)·τ; the
+   sub-unity follow exponent stretches the dB slope by 1/follow) —
+   verified by sweep within ~10 % except at knob max (source re-feed
+   inflates it to 4.7 s). Recipe's "release 0.6 ≈ 131 ms" is
+   audibly 1.4 s; knob min (0.30 s audible) is already the
+   real-snare zone — the whole realistic range is crammed below ~5 %
+   of the throw. The M10 remap fixed the SPAN but not the UNITS:
+   same bug class one level down. M11 fix: recalibrate the knob in
+   perceived-T60 seconds — `rel_t = T60_knob·dust_follow/6.908`,
+   T60_knob log-mapped ~0.15–1.5 s (real-snare zone lower-middle,
+   inversion/gated-reverb at top). Mapping-only change, no new ids.
 4. **Fundamental dominance** — dominant measured peak AT f0, next
    partials ≥9 dB down (weighting law or tilt fix, verify by
    re-running the battery on renders).
