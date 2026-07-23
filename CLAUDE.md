@@ -80,6 +80,21 @@ and `PATHS-NOT-TAKEN.md`.
   (a sleep floor referencing the wrong peak, and single-block sleep
   on bursty tails — contact chaos amplifies ULP differences past
   −80 dB, so satellite contact keeps exact powf).
+- **Finiteness gates are blind to BOUNDED eternal oscillation** —
+  the M12.1 scream (loud, constant, hard-panned, param-immune;
+  reset-only recovery) passed every finiteness fuzz. Standing cures:
+  contact integrators resolve a contact over many samples (ω clamp
+  0.5·sr — clamp the TOTAL stiffness, not the spring); the
+  entry-rate fuse (a discrete rattle cannot re-enter contact >1 kHz
+  for 300 ms — sustained machine-gun rate = pump by definition);
+  the output airbag (4 s continuous envelope above 5 % of own peak
+  → voice dead; healthy-unreachable). Standing gates: engine
+  `decay_gate` tests (everything must decay to −80 dB UNASSISTED,
+  zero airbag trips) and `clg hunt N SEED` for corpus sweeps. Fixes
+  that touch the healthy signal path can never pass the null gate —
+  two candidates (reaction LP, restitution exit guard) were
+  correctly rejected by it; cures must be zero-effect until the
+  pathology discriminator trips. (M12.1.)
 
 ## Current state (2026-07-24)
 

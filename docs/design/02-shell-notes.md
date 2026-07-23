@@ -433,3 +433,37 @@ flat, dominance 12.5 dB @191), install 12/12 RELEASE with
 (fixed methodology; `full x8` worst-block < 25 % is the ship gate)
 and `tools/qc.zsh` (the only sanctioned install path: fuzz → build
 → install --release → hash-verify → validate → bench).
+
+## M12.1 — the scream (2026-07-23, critical bug fix)
+
+Sam summoned a loud, constant, hard-panned, near-Nyquist,
+parameter-immune oscillation (wires/satellites/plate/stick; only a
+plugin reset killed it). Root causes (found by `clg hunt`, the new
+scream-hunter fuzzer — the finiteness fuzz gate is BLIND to bounded
+eternal oscillation): (1) satellite contact ω clamp budgeted the
+spring alone — contact stiffening parked the integrator at the
+symplectic-Euler boundary (bounded eternal Nyquist chatter), and
+near-single-sample contacts mint energy (numerical restitution >1 →
+perpetual bouncers); (2) the rectified satellite react (injected
+without the M10 dissipation normalization — M8 predates the law)
+self-tunes into a pump on the detuned R rotor when ignited by
+buckling×cascade. Param-immunity explained structurally: params
+latch at trigger, steal picks the quietest voice, sleep needs
+−90 dB. Fixes: **contact ω clamp 1.885→0.5·sr** (~12 samples per
+contact period, presets untouched) + **the entry-rate fuse**
+(sustained >1.1 kHz contact-entry rate for 300 ms, or >2.4 kHz
+instant, disarms that satellite for 200 ms — zero signal effect
+until tripped). Two candidate fixes REJECTED by the null gate:
+reaction LP (−7 dB) and a restitution-inequality exit guard
+(−15.6 dB — a moving surface legitimately ejects faster than
+e×entry). Armor: engine `decay_gate` tests (repro + 48-config
+neighborhood + buckling-pump, all must decay to −80 dB unassisted,
+zero airbag trips); **the output airbag** (4 s continuous envelope
+above 5 % of own peak → 10 ms fade → voice dead; `airbag_trips()`
+exposed; unreachable by healthy patches); `clg hunt N SEED` kept.
+Results: repro 347k entries → 830 (decays in 1.17 s); 10k-config
+five-seed hunt, loud class extinct; null matrix bit-exact (−inf)
+all six patches; shell 6/6; qc.zsh full pass (validator 18/18
+0-warn, auval OK, bench 12.7 % worst block). Known remainder:
+~1/1000 hostile configs settle into quiet (−45..−80 dB) immortal
+LF floors — CPU-leak class, not audible-pain class; future round.

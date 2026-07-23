@@ -415,6 +415,27 @@ pub struct Engine {
     dust_peak: f32,  // running peak of bank |y| (shared normalizer)
     out_peak: f32,   // M12: running peak of the FINAL output (sleep ref)
     quiet_run: u32,  // M12: consecutive samples below the sleep floor
+    // M12.1 — the output airbag (circuit breaker, NOT waveshaping): a
+    // percussive voice cannot legitimately hold its envelope above 5%
+    // of its own peak for 4 s straight (t60 max × brace ≈ 2.6 s of
+    // legit sustain); only a self-oscillating loop can. Trip → 10 ms
+    // fade → voice dead. Unreachable by any healthy patch (verified:
+    // null matrix + hunt corpus, zero trips).
+    loud_env: f32,   // ~10 ms max-decay envelope of |out|
+    loud_rel: f32,   // its per-sample release coeff (new(), sr-derived)
+    loud_run: u32,   // consecutive samples with env above 5% of peak
+    airbag: u32,     // fade countdown once tripped (0 = armed)
+    airbag_g: f32,   // per-sample fade gain step
+    airbag_trips: u32, // lifetime trip count (QC/debug visibility)
+    // M12.1 — entry-rate fuse (leaky per-satellite entry counters +
+    // cooldown timers; see the contact blocks)
+    sat_er: [f32; MAX_SATS],
+    sat_er_r: [f32; MAX_SATS],
+    sat_cool: [u32; MAX_SATS],
+    sat_cool_r: [u32; MAX_SATS],
+    sat_hot: [u32; MAX_SATS],
+    sat_hot_r: [u32; MAX_SATS],
+    er_decay: f32, // ~50 ms leak (new(), sr-derived)
     dust_lp1: f32,   // crude bandpass: HP(lp1) then LP(lp2) states
     dust_lp2: f32,
     // M9 wire-bed state (engaged when any bed_* param is non-default;
@@ -697,6 +718,19 @@ impl Engine {
             dust_peak: 0.0,
             out_peak: 0.0,
             quiet_run: 0,
+            loud_env: 0.0,
+            loud_rel: (-1.0 / (0.010 * sr)).exp(),
+            loud_run: 0,
+            airbag: 0,
+            airbag_g: 0.0,
+            airbag_trips: 0,
+            sat_er: [0.0; MAX_SATS],
+            sat_er_r: [0.0; MAX_SATS],
+            sat_cool: [0; MAX_SATS],
+            sat_cool_r: [0; MAX_SATS],
+            sat_hot: [0; MAX_SATS],
+            sat_hot_r: [0; MAX_SATS],
+            er_decay: (-1.0 / (0.050 * sr)).exp(),
             dust_lp1: 0.0,
             dust_lp2: 0.0,
             bed_env: 0.0,
@@ -810,6 +844,13 @@ impl Engine {
         0
     }
 
+    /// M12.1 — lifetime airbag trip count. Zero on every healthy patch
+    /// (asserted by the decay gate + null matrix); nonzero means a
+    /// self-oscillation was contained and should be reported as a bug.
+    pub fn airbag_trips(&self) -> u32 {
+        self.airbag_trips
+    }
+
     pub fn reset(&mut self) {
         for m in self.modes.iter_mut() {
             m.u = 0.0;
@@ -832,6 +873,9 @@ impl Engine {
         self.x1_acc = 0.0;
         self.pulse_pos = usize::MAX;
         self.active = false;
+        self.loud_env = 0.0;
+        self.loud_run = 0;
+        self.airbag = 0;
     }
 
     fn mode_table(&mut self, p: &EngineParams) {
@@ -1220,11 +1264,26 @@ impl Engine {
             // M8 — velocity throw: a hard hit scatters the hardware upward
             // immediately (bounce-scaled); the settle brings it home.
             self.sat_v[j] = b * p.velocity * 14.0 * rest0.max(0.05);
-            // symplectic-Euler stability: ω·dt < 2 — clamp to 0.3·2π·sr
-            // (fuzzed Tune x Track x f0 extremes can otherwise blow past it
-            // and NaN the contact integrator: the M8 validator-hang lesson)
+            // M12.1 (the scream) — the contact integrator must resolve a
+            // contact event over MANY samples, not ~1. The old clamp
+            // (1.885·sr, "ω·dt < 2, spring-stable") allowed penalty
+            // contacts at 1–2 samples per event, where explicit
+            // integration mints energy on every bounce (numerical
+            // restitution > 1): a satellite on even a STATIC seat
+            // becomes a perpetual bouncer — bounded, eternal,
+            // hard-panned, near-Nyquist, parameter-immune (Sam: "loud
+            // and constant, no parameter had any effect"). Measured
+            // boundary (decay_gate sweep): eternal at ω·dt ≈ 0.9–1.0,
+            // clean at 0.8; a reaction-LP variant was tried and REJECTED
+            // (−7 dB null on healthy satellite patches — audible-path
+            // filters can never pass the drift gate). 0.5·sr = ~12
+            // samples per contact period, ~1.8× under the boundary.
+            // Presets at default Tune sit at 0.13–0.48 rad — bit-exact
+            // untouched; only Track×Tune×f0 extremes hit the cap, and
+            // the audible partial ring (sat_pcw, 0.45·sr-capped) is
+            // independent of contact ω. Clamp last; kc/ze derive.
             self.sat_om[j] = (2.0 * core::f32::consts::PI * p.sat_fs[j] * fscale)
-                .clamp(20.0, 1.885 * self.sr);
+                .clamp(20.0, 0.5 * self.sr);
             self.sat_ze[j] = 6.9078 / (p.sat_t60[j].max(1e-3) * self.sat_om[j]);
             // contact kick gain in NORMALIZED units: a full-depth contact
             // (pen ~ rest) rings the satellite at ~1/3 of its gap scale.
@@ -1233,6 +1292,12 @@ impl Engine {
             self.sat_kc[j] = 0.05 * self.sat_om[j] * self.sat_om[j];
             self.sat_incontact[j] = false;
             self.sat_incontact_r[j] = false;
+            self.sat_er[j] = 0.0;
+            self.sat_er_r[j] = 0.0;
+            self.sat_cool[j] = 0;
+            self.sat_cool_r[j] = 0;
+            self.sat_hot[j] = 0;
+            self.sat_hot_r[j] = 0;
             self.sat_sdp[j] = 0.0;
             self.sat_sdp_r[j] = 0.0;
             self.sat_sdvp[j] = 0.0;
@@ -1281,6 +1346,9 @@ impl Engine {
         self.dust_peak = 1e-9;
         self.out_peak = 0.0;
         self.quiet_run = 0;
+        self.loud_env = 0.0;
+        self.loud_run = 0;
+        self.airbag = 0;
         self.dust_lp1 = 0.0;
         self.dust_lp2 = 0.0;
         self.dust_lp1r = 0.0;
@@ -1796,6 +1864,46 @@ impl Engine {
                 let sd_r = self.seat_acc_r[j];
                 let om = self.sat_om[j];
                 let rest = self.sat_rest_eff[j];
+                // M12.1 — the entry-rate fuse. A discrete rattling object
+                // cannot physically re-enter contact thousands of times a
+                // second for hundreds of ms (healthy worst bursts measure
+                // ≤ ~40 entries/50 ms window; the buckling-ignited R-rotor
+                // pump machine-guns at ~375). Sustained machine-gun rate =
+                // a self-oscillating pump by definition → the satellite
+                // "overheats": contact machinery disarms for 200 ms (its
+                // ringing voice decays naturally), then re-arms. Trips
+                // ONLY in pathological regimes — when untripped the
+                // estimator has zero effect on the signal path, so every
+                // healthy patch stays bit-exact.
+                self.sat_er[j] *= self.er_decay;
+                // two-tier trip: instant on machine-gun (er > 120 ≈
+                // sustained 2.4 kHz), or PERSISTENT er > 55 (≈ 1.1 kHz)
+                // held 300 ms — healthy attack bursts cross 55 for
+                // < 100 ms then decay; only a self-sustained bouncer
+                // holds it (hunt corpus: eternal bouncers ride 1.3 kHz+
+                // forever). Both thresholds are ≥ 3× above any measured
+                // healthy window (≤ ~40 entries / 50 ms at the wildest
+                // preset extremes).
+                if self.sat_er[j] > 55.0 {
+                    self.sat_hot[j] += 1;
+                } else {
+                    self.sat_hot[j] = 0;
+                }
+                if self.sat_er[j] > 120.0
+                    || self.sat_hot[j] as f32 > 0.3 * self.sr
+                {
+                    self.sat_cool[j] = (0.2 * self.sr) as u32;
+                    self.sat_er[j] = 0.0;
+                    self.sat_hot[j] = 0;
+                }
+                if self.sat_cool[j] > 0 {
+                    self.sat_cool[j] -= 1;
+                    self.sat_z[j] = rest;
+                    self.sat_v[j] = 0.0;
+                    self.sat_incontact[j] = false;
+                    sat_react[j] = 0.0;
+                    // (voice rotors below still run and decay)
+                } else {
                 // ---- L bank (M8 dynamics: spring blends out, gravity +
                 // restitution blend in as bounce rises; the settle is
                 // geometric because flight time ∝ v and v <- e·v per bounce)
@@ -1852,11 +1960,19 @@ impl Engine {
                         }
                         shock += hit_amp; // rattle->cascade shock (entries only)
                         self.entries += 1;
+                        // M12.1 fuse: count the entry (trip logic below)
+                        self.sat_er[j] += 1.0;
                         // ring the satellite's partial voice
                         for q in 0..SAT_PARTIALS {
                             self.sat_pu[j][q] += hit_amp * self.sat_pamp[j][q];
                         }
                     }
+                    // (M12.1 note: a restitution-inequality exit guard —
+                    // exit speed ≤ e × entry speed — was tried here and
+                    // REJECTED by the null gate at −15.6 dB: a MOVING
+                    // surface legitimately ejects faster than e×entry;
+                    // that's the vibrating table doing work. The fuse
+                    // below owns the eternal-bouncer class instead.)
                     self.sat_incontact[j] = pen > 0.0;
                     // pressed buzz: continuous contact scrape drives the
                     // voice too (bounce mode is pure event-clicks)
@@ -1883,6 +1999,7 @@ impl Engine {
                 // bounce mode is event physics — continuous push-reaction is
                 // pressed-mode physics only (also starves the pump)
                 sat_react[j] = 0.15 * f_n * (1.0 - b_snc);
+                } // end M12.1 fuse arm (L)
                 // multi-modal voice: partial rotors ring; sum is the radiation
                 let mut voice = 0.0f32;
                 for q in 0..SAT_PARTIALS {
@@ -1901,6 +2018,27 @@ impl Engine {
                 sat_radiate += p.sat_level[j] * voice;
                 // ---- R bank (stereo only), same laws, own contact events
                 if stereo {
+                    // M12.1 fuse, R arm (see the L bank for the story)
+                    self.sat_er_r[j] *= self.er_decay;
+                    if self.sat_er_r[j] > 55.0 {
+                        self.sat_hot_r[j] += 1;
+                    } else {
+                        self.sat_hot_r[j] = 0;
+                    }
+                    if self.sat_er_r[j] > 120.0
+                        || self.sat_hot_r[j] as f32 > 0.3 * self.sr
+                    {
+                        self.sat_cool_r[j] = (0.2 * self.sr) as u32;
+                        self.sat_er_r[j] = 0.0;
+                        self.sat_hot_r[j] = 0;
+                    }
+                    if self.sat_cool_r[j] > 0 {
+                        self.sat_cool_r[j] -= 1;
+                        self.sat_z_r[j] = rest;
+                        self.sat_v_r[j] = 0.0;
+                        self.sat_incontact_r[j] = false;
+                        sat_react_r[j] = 0.0;
+                    } else {
                     self.sat_speak_r[j] = self.sat_speak_r[j].max(sd_r.abs());
                     let sd_nr = sd_r / self.sat_speak_r[j];
                     let pen_r = (sd_nr - self.sat_z_r[j]).clamp(0.0, 2.0);
@@ -1939,10 +2077,13 @@ impl Engine {
                             }
                             shock += hit_amp;
                             self.entries += 1;
+                            // M12.1 fuse: entry count, R arm
+                            self.sat_er_r[j] += 1.0;
                             for q in 0..SAT_PARTIALS {
                                 self.sat_pu_r[j][q] += hit_amp * self.sat_pamp[j][q];
                             }
                         }
+                        // (exit guard rejected — see L bank note)
                         self.sat_incontact_r[j] = pen_r > 0.0;
                         if pen_r > 0.0 && b_snc < 1.0 {
                             let scrape = f_nr * 0.12 * (1.0 - b_snc);
@@ -1964,6 +2105,7 @@ impl Engine {
                         self.sat_carried_r[j] = false;
                     }
                     sat_react_r[j] = 0.15 * f_nr * (1.0 - b_snc);
+                    } // end M12.1 fuse arm (R)
                     let mut voice_r = 0.0f32;
                     for q in 0..SAT_PARTIALS {
                         if self.sat_pamp[j][q] > 0.0 {
@@ -2535,9 +2677,22 @@ impl Engine {
                 yl *= ch;
                 yr *= ch;
             }
+            // M12.1 airbag fade: once tripped, 10 ms ramp to silence,
+            // then the voice is dead (state cleared at next trigger)
+            if self.airbag > 0 {
+                let g = self.airbag as f32 * self.airbag_g;
+                yl *= g;
+                yr *= g;
+                self.airbag -= 1;
+                if self.airbag == 0 {
+                    self.active = false;
+                }
+            }
             out_l[i] = yl;
             out_r[i] = yr;
-            peak = peak.max(yl.abs()).max(yr.abs());
+            let oa = yl.abs().max(yr.abs());
+            peak = peak.max(oa);
+            self.loud_env = oa.max(self.loud_env * self.loud_rel);
             self.t += dt;
         }
         // M12 perf — voice sleep at −90 dB below the voice's own running
@@ -2548,6 +2703,23 @@ impl Engine {
         // floor was ~−154 dB for a typical hit, so plugin voices burned
         // full engine cost for seconds of inaudible tail.
         self.out_peak = self.out_peak.max(peak);
+        // M12.1 airbag trip check (block rate): 4 s of CONTINUOUS
+        // envelope above 5% of the voice's own peak = self-oscillation
+        // (max legit sustain ≈ 2.6 s at t60 max × brace scale). The
+        // 10 ms-release loud_env bridges Nyquist-rate zero crossings,
+        // so a constant scream holds the counter unbroken.
+        if self.airbag == 0 {
+            if self.loud_env > 0.05 * self.out_peak && self.out_peak > 1e-4 {
+                self.loud_run += n as u32;
+            } else {
+                self.loud_run = 0;
+            }
+            if self.loud_run as f32 >= 4.0 * self.sr {
+                self.airbag = (0.010 * self.sr) as u32;
+                self.airbag_g = 1.0 / self.airbag as f32;
+                self.airbag_trips += 1;
+            }
+        }
         let sleep_floor = (self.out_peak * 3.16e-5).max(1e-6);
         if peak < sleep_floor {
             self.quiet_run += n as u32;
@@ -2622,4 +2794,360 @@ pub fn apply_size_macro(p: &mut EngineParams, size: f32) {
 
 pub fn db(x: f32) -> f32 {
     db_to_lin(x)
+}
+
+// ---------------------------------------------------------------------------
+// M12.1 — the decay gate. The scream taught the standing lesson: the fuzz
+// finiteness gate is BLIND to bounded eternal oscillation. This gate isn't:
+// every config here must decay to −80 dB below its own peak, unassisted
+// (zero airbag trips — the airbag is containment for the classes we haven't
+// met yet, never an excuse for the ones we have).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod decay_gate {
+    use super::*;
+
+    fn run(p: &EngineParams, secs: f32) -> (f32, f32, u32) {
+        // returns (peak, trailing-500ms RMS, airbag trips)
+        let sr = 44100.0;
+        let mut e = Engine::new(sr);
+        e.trigger(p);
+        let total = (sr * secs) as usize;
+        let tail_n = (sr * 0.5) as usize;
+        let mut bl = [0.0f32; 256];
+        let mut br = [0.0f32; 256];
+        let mut peak = 0.0f32;
+        let mut done = 0usize;
+        let mut tail: Vec<f32> = Vec::new();
+        while done < total {
+            let live = e.process(&mut bl, &mut br);
+            for (&l, &r) in bl.iter().zip(br.iter()) {
+                assert!(l.is_finite() && r.is_finite(), "non-finite output");
+                peak = peak.max(l.abs().max(r.abs()));
+            }
+            done += bl.len();
+            if done + tail_n >= total {
+                tail.extend_from_slice(&bl);
+                tail.extend_from_slice(&br);
+            }
+            if !live {
+                break;
+            }
+        }
+        let rms = if tail.is_empty() {
+            0.0
+        } else {
+            (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt()
+        };
+        (peak, rms, e.airbag_trips())
+    }
+
+    fn assert_decays(name: &str, p: &EngineParams) {
+        let (peak, rms, trips) = run(p, 4.5);
+        let rel_db = 20.0 * (rms / peak.max(1e-12)).max(1e-12).log10();
+        assert!(
+            rel_db <= -80.0,
+            "{name}: tail at {rel_db:.1} dB rel peak — eternal oscillation"
+        );
+        assert_eq!(trips, 0, "{name}: airbag tripped — contained, not cured");
+    }
+
+    /// The M12.1 scream repro (hunt seed 1 idx 2979, shrunk): plate +
+    /// stick + trash sats, rattle_track×f0 driving contact ω into the
+    /// old 1.885·sr clamp, tiny gap. Pre-fix: ~2 contact entries per
+    /// sample forever, −11.9 dB eternal tail, hard-panned.
+    fn scream_config() -> EngineParams {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Plate;
+        p.exciter = Exciter::Stick;
+        p.f0 = 1258.62;
+        p.velocity = 0.899;
+        p.position = 0.097;
+        p.listen_pos = 0.901;
+        p.stiffness = 0.418;
+        p.t60_base = 0.161;
+        p.tilt = 0.337;
+        p.out_tilt_db_oct = -9.35;
+        p.glide_st = 5.27;
+        p.cascade_amt = 0.802;
+        p.cascade_tau = 0.2287;
+        p.cascade_split = 2.697;
+        p.cascade_attack = 0.456;
+        p.sat_count = 3;
+        p.sat_fs = [1300.0, 2100.0, 3400.0, 0.0];
+        p.sat_t60 = [0.12, 0.10, 0.07, 0.1];
+        p.sat_seat = [0.18, 0.52, 0.80, 0.0];
+        p.sat_rest = [0.30, 0.45, 0.20, 0.0];
+        p.sat_level = [1.0, 0.9, 0.7, 0.0];
+        p.sat_pr = [[1.0, 1.34, 1.83, 2.51], [1.0, 1.47, 2.06, 2.9],
+                    [1.0, 1.62, 2.24, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.sat_pa = [[1.0, 0.7, 0.5, 0.35], [1.0, 0.65, 0.45, 0.3],
+                    [1.0, 0.6, 0.4, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.rattle_level = 0.509;
+        p.rattle_casc = 0.040;
+        p.bounce = 0.366;
+        p.rattle_gap = 0.038;
+        p.gap_vel = 0.753;
+        p.rattle_tune = 13.41 / 12.0;
+        p.rattle_track = 0.600;
+        p.walk = 0.539;
+        p.dust_level = 0.609;
+        p.dust_thr_db = -73.9;
+        p.dust_follow = 1.196;
+        p.bed_release = 0.790;
+        p.bed_source = 0.585;
+        p.bed_comb = 0.243;
+        p.bed_bright = 0.829;
+        p.cavity = 0.784;
+        p.cavity_tune = 782.55;
+        p.head2_tune = 0.67;
+        p.head2_damp = 0.354;
+        p.wires = 0.377;
+        p.wire_tune = 2584.7;
+        p.wire_decay = 0.197;
+        p.wire_throw = 0.985;
+        p.root_weight = 0.334;
+        p.decohere = 0.794;
+        p.stereo_floor = 0.709;
+        p.mode_spread = 0.957;
+        p.damp_asym = 0.423;
+        p.sub_rotate = 0.094;
+        p.ex_color = 0.609;
+        p.ex_time = 0.461;
+        p
+    }
+
+    #[test]
+    fn scream_repro_decays() {
+        assert_decays("scream idx2979", &scream_config());
+    }
+
+    fn config_1432_a() -> EngineParams {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Membrane;
+        p.exciter = Exciter::Buckling;
+        p.f0 = 1462.98;
+        p.velocity = 0.305;
+        p.position = 0.356;
+        p.listen_pos = 0.577;
+        p.stiffness = 0.232;
+        p.t60_base = 1.528;
+        p.tilt = 0.362;
+        p.out_tilt_db_oct = -6.61;
+        p.glide_st = 7.57;
+        p.cascade_amt = 0.968;
+        p.cascade_tau = 0.1081;
+        p.cascade_split = 1.841;
+        p.cascade_attack = 0.618;
+        p.sat_count = 2;
+        p.sat_fs = [1900.0, 2700.0, 0.0, 0.0];
+        p.sat_t60 = [0.10, 0.08, 0.1, 0.1];
+        p.sat_seat = [0.22, 0.61, 0.0, 0.0];
+        p.sat_rest = [0.15, 0.22, 0.0, 0.0];
+        p.sat_level = [1.0, 0.8, 0.0, 0.0];
+        p.sat_pr = [[1.0, 1.53, 2.31, 0.0], [1.0, 1.71, 2.63, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.sat_pa = [[1.0, 0.6, 0.35, 0.0], [1.0, 0.55, 0.3, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.rattle_level = 0.919;
+        p.rattle_casc = 0.318;
+        p.bounce = 0.123;
+        p.rattle_gap = 0.092;
+        p.gap_vel = 0.438;
+        p.rattle_tune = 13.16 / 12.0;
+        p.rattle_track = 0.422;
+        p.walk = 0.005;
+        p.dust_level = 0.862;
+        p.dust_thr_db = -14.0;
+        p.dust_follow = 0.321;
+        p.bed_release = 0.813;
+        p.bed_source = 0.840;
+        p.bed_comb = 0.055;
+        p.bed_bright = 0.102;
+        p.cavity = 0.846;
+        p.cavity_tune = 58.02;
+        p.head2_tune = 8.07;
+        p.head2_damp = 0.865;
+        p.wires = 0.906;
+        p.wire_tune = 1649.1;
+        p.wire_decay = 0.671;
+        p.wire_throw = 0.711;
+        p.root_weight = 0.058;
+        p.decohere = 0.934;
+        p.stereo_floor = 0.299;
+        p.mode_spread = 0.645;
+        p.damp_asym = 0.122;
+        p.sub_rotate = 0.726;
+        p.ex_color = 0.452;
+        p.ex_time = 0.317;
+        p
+    }
+
+    fn config_1432_b() -> EngineParams {
+        let mut p = EngineParams::default();
+        p.arch = Arch::Plate;
+        p.exciter = Exciter::Raw;
+        p.f0 = 220.71;
+        p.velocity = 0.264;
+        p.position = 0.085;
+        p.listen_pos = 0.868;
+        p.stiffness = 0.760;
+        p.t60_base = 0.159;
+        p.tilt = 0.415;
+        p.out_tilt_db_oct = -7.27;
+        p.glide_st = 5.44;
+        p.sat_count = 2;
+        p.sat_fs = [1900.0, 2700.0, 0.0, 0.0];
+        p.sat_t60 = [0.10, 0.08, 0.1, 0.1];
+        p.sat_seat = [0.22, 0.61, 0.0, 0.0];
+        p.sat_rest = [0.15, 0.22, 0.0, 0.0];
+        p.sat_level = [1.0, 0.8, 0.0, 0.0];
+        p.sat_pr = [[1.0, 1.53, 2.31, 0.0], [1.0, 1.71, 2.63, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.sat_pa = [[1.0, 0.6, 0.35, 0.0], [1.0, 0.55, 0.3, 0.0],
+                    [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        p.rattle_level = 0.190;
+        p.rattle_casc = 0.377;
+        p.bounce = 0.572;
+        p.rattle_gap = 0.041;
+        p.gap_vel = 0.753;
+        p.rattle_tune = -15.05 / 12.0;
+        p.rattle_track = 0.667;
+        p.walk = 0.927;
+        p.dust_level = 0.790;
+        p.dust_thr_db = -72.3;
+        p.dust_follow = 1.212;
+        p.bed_release = 0.311;
+        p.bed_source = 0.525;
+        p.bed_comb = 0.580;
+        p.bed_bright = 0.995;
+        p.wires = 0.721;
+        p.wire_tune = 1340.9;
+        p.wire_decay = 0.572;
+        p.wire_throw = 0.343;
+        p.root_weight = 0.928;
+        p.decohere = 0.144;
+        p.stereo_floor = 0.554;
+        p.mode_spread = 0.091;
+        p.damp_asym = 0.380;
+        p.sub_rotate = 0.321;
+        p.ex_color = 0.825;
+        p.ex_time = 0.233;
+        p
+    }
+
+    fn run_ab(a: &EngineParams, b: &EngineParams) -> f32 {
+        // trigger A, 0.5 s, trigger B, 4 s more; trailing 0.5 s dB rel peak
+        let sr = 44100.0;
+        let mut e = Engine::new(sr);
+        e.trigger(a);
+        let mut bl = [0.0f32; 256];
+        let mut br = [0.0f32; 256];
+        let mut peak = 0.0f32;
+        let mut done = 0usize;
+        let pre = (sr * 0.5) as usize;
+        let total = (sr * 4.5) as usize;
+        let tail_n = (sr * 0.5) as usize;
+        let mut tail: Vec<f32> = Vec::new();
+        let mut retriggered = false;
+        while done < total {
+            let live = e.process(&mut bl, &mut br);
+            for (&l, &r) in bl.iter().zip(br.iter()) {
+                peak = peak.max(l.abs().max(r.abs()));
+            }
+            done += bl.len();
+            if !retriggered && done >= pre {
+                e.trigger(b);
+                retriggered = true;
+            }
+            if done + tail_n >= total {
+                tail.extend_from_slice(&bl);
+                tail.extend_from_slice(&br);
+            }
+            if retriggered && !live {
+                break;
+            }
+        }
+        if tail.is_empty() {
+            return -200.0;
+        }
+        let rms =
+            (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+        20.0 * (rms / peak.max(1e-12)).max(1e-12).log10()
+    }
+
+    #[test]
+    fn buckling_pump_decays() {
+        // seed 13 idx 1432 config A: buckling × cascade × decohere ignites
+        // a rectified-react pump on the detuned R rotor (the entry-rate
+        // fuse is the cure); single-trigger, 4.5 s, must decay unassisted
+        assert_decays("buckling-pump idx1432A", &config_1432_a());
+    }
+
+    #[test]
+    #[ignore] // exploration harness, run with --ignored when hunting
+    fn retrig_bisect_table() {
+        // ablation-table harness for retrigger-path suspects (M12.1);
+        // prints a table, asserts nothing — the real gates are above
+        let a = config_1432_a();
+        let b = config_1432_b();
+        println!("A->B full        : {:6.1} dB", run_ab(&a, &b));
+        let mut v = b;
+        v.sat_count = 0;
+        println!("B no sats        : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.wires = 0.0;
+        println!("B no wires       : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.dust_level = 0.0;
+        println!("B no dust/bed    : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.decohere = 0.0;
+        v.mode_spread = 0.0;
+        v.damp_asym = 0.0;
+        v.sub_rotate = 0.0;
+        println!("B mono           : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.bounce = 0.0;
+        println!("B bounce 0       : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.walk = 0.0;
+        println!("B walk 0         : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.rattle_track = 0.0;
+        println!("B track 0        : {:6.1} dB", run_ab(&a, &v));
+        let mut v = b;
+        v.rattle_gap = 0.5;
+        println!("B gap 0.5        : {:6.1} dB", run_ab(&a, &v));
+        let mut va = a;
+        va.cascade_amt = 0.0;
+        println!("A casc 0         : {:6.1} dB", run_ab(&va, &b));
+        let mut va = a;
+        va.cavity = 0.0;
+        println!("A cavity 0       : {:6.1} dB", run_ab(&va, &b));
+        let mut va = a;
+        va.wires = 0.0;
+        println!("A wires 0        : {:6.1} dB", run_ab(&va, &b));
+    }
+
+    #[test]
+    fn scream_neighborhood_decays() {
+        // sweep the lethal axes around the repro: track, gap, tune,
+        // bounce, f0 — the marginal zone must be GONE, not moved
+        let base = scream_config();
+        for (i, track) in [0.3f32, 0.6, 0.8, 1.0].iter().enumerate() {
+            for (j, gap) in [0.0f32, 0.038, 0.1].iter().enumerate() {
+                for (k, tune) in [-2.0f32, 0.0, 1.117, 2.0].iter().enumerate() {
+                    let mut p = base;
+                    p.rattle_track = *track;
+                    p.rattle_gap = *gap;
+                    p.rattle_tune = *tune;
+                    // vary bounce + f0 on a diagonal to bound the sweep
+                    p.bounce = [0.0, 0.366, 0.7, 1.0][(i + k) % 4];
+                    p.f0 = [180.0, 700.0, 1258.62, 1900.0][(i + j + k) % 4];
+                    assert_decays(&format!("nbhd t{track} g{gap} tn{tune}"), &p);
+                }
+            }
+        }
+    }
 }
