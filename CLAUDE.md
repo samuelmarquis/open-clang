@@ -61,15 +61,38 @@ and `PATHS-NOT-TAKEN.md`.
   through M9 (the Stick tick was in the plugin but not the renders).
   Never let a measurement/render path post-process what the plugin
   ships.
+- **Install is `--release`, verified by hash** — `cargo xtask
+  install` defaults to the DEBUG profile; the omitted flag shipped
+  debug builds through M9–M11 (17.6× slower engine — 8 voices ran at
+  0.7× realtime and underran Sam's M4 in a blank project, while the
+  release engine idled at 12% budget). `tools/qc.zsh` is the only
+  sanctioned install path: it fuzzes, builds+installs release,
+  HASH-VERIFIES installed == release artifact, validates, and
+  benches. (M12.)
+- **No round ships without `clg bench`** — fixed methodology (recipe
+  v3, 64-frame blocks, retriggered voices); the gate is the
+  `full x8` worst-block row: < 25 % of block budget (M12 landed it
+  at 11.7 %). Underruns live in the worst block, not the average.
+- **Perf-work drift policy** — bit-exact where free; where float
+  order changes, gate with a null test vs prior HEAD over the
+  six-patch matrix (v3/wood/sats/casc/buck/dust, `lab/null_ab.py`):
+  peak diff ≤ −80 dB rel peak. The gate caught two real bugs in M12
+  (a sleep floor referencing the wrong peak, and single-block sleep
+  on bursty tails — contact chaos amplifies ULP differences past
+  −80 dB, so satellite contact keeps exact powf).
 
 ## Current state (2026-07-24)
 
-Instrument installed (CLAP/VST3/AU, `aumu`/`Clg1`/`Oclg`), params
-0–47 dense, engine = `rt/engine` (canonical since M3 parity; Python
-`lab/` frozen). M10 (NESS: cavity+second head, Stick exciter, biquad
-band-limit) built, snare verdict pending (out/snare-v2). Queued: M11
-Net1 rattling interconnections (deferred from M10). Deferred: panel
-(waits on Sam's external design system; drawable graph lanes incl.
-decay-law curve), Alignment articulator (post-panel), effect mode
-(sidechain vs separate plugin, undecided), presets (Sam's friends,
-post-panel), MPE/choke (designed, post-panel).
+Instrument installed (CLAP/VST3/AU, `aumu`/`Clg1`/`Oclg`,
+RELEASE-profile, hash-verified), params 0–52 dense, engine =
+`rt/engine` (canonical since M3 parity; Python `lab/` frozen). M11
+(wire bank Net1, crack-as-throw, Root Weight) built and battery-
+gated; snare verdict "pretty good," voicing settled low (f0 ≤ 155,
+out/snare-v3b). M12 perf round done: debug-install root cause fixed,
+engine 1.36× faster, 8-voice worst block 11.7 % budget. Queued:
+Net1 rattling interconnections (bar-rescue, deferred from M10/M11).
+Deferred: panel (waits on Sam's external design system; drawable
+graph lanes incl. decay-law curve), Alignment articulator
+(post-panel), effect mode (sidechain vs separate plugin, undecided),
+presets (Sam's friends, post-panel), MPE/choke (designed,
+post-panel).

@@ -11,6 +11,10 @@ fn die(msg: &str) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() && args[0] == "bench" {
+        bench(&args[1..]);
+        return;
+    }
     if args.len() < 2 || args[0] != "render" {
         die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--wires 0..1] [--wire-tune HZ] [--wire-decay S] [--wire-throw 0..1] [--root-weight 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
@@ -252,4 +256,194 @@ fn main() {
         peak,
         out_path
     );
+}
+
+// ---------------------------------------------------------------------------
+// M12 — `clg bench`: the CPU truth-teller. Fixed methodology so numbers are
+// comparable across rounds (this table is a QC gate: see CLAUDE.md).
+//
+// Scenario: SNARE RECIPE v3 (the expensive patch — wires + cavity + bed +
+// satellites + decohere + Stick), 64-frame blocks at 44.1k, 4 s per case,
+// every voice re-triggered each second (staggered 25 ms) so the whole run
+// stays in the loud/contact-heavy phase — the worst block is the one that
+// causes underruns, so worst-block % of budget is the headline number.
+// ---------------------------------------------------------------------------
+
+fn bench_recipe_v3(vel: f32) -> EngineParams {
+    let mut p = EngineParams::default();
+    p.arch = Arch::Membrane;
+    p.f0 = 190.0;
+    p.velocity = vel;
+    p.stiffness = 0.8;
+    p.t60_base = 0.42;
+    p.tilt = 0.6;
+    p.out_tilt_db_oct = -6.0;
+    // --sats wires preset (M8 voicing) + rattle level
+    p.sat_count = 2;
+    p.sat_fs = [1900.0, 2700.0, 0.0, 0.0];
+    p.sat_t60 = [0.10, 0.08, 0.1, 0.1];
+    p.sat_seat = [0.22, 0.61, 0.0, 0.0];
+    p.sat_rest = [0.15, 0.22, 0.0, 0.0];
+    p.sat_level = [1.0, 0.8, 0.0, 0.0];
+    p.sat_pr = [
+        [1.0, 1.53, 2.31, 0.0],
+        [1.0, 1.71, 2.63, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ];
+    p.sat_pa = [
+        [1.0, 0.6, 0.35, 0.0],
+        [1.0, 0.55, 0.3, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ];
+    p.rattle_level = 0.35;
+    p.decohere = 0.2;
+    p.dust_level = 0.45;
+    p.dust_thr_db = -55.0;
+    p.dust_follow = 0.7;
+    p.bed_source = 0.7;
+    p.bed_comb = 0.3;
+    p.bed_release = 0.55;
+    p.bed_bright = 0.7;
+    p.exciter = Exciter::Stick;
+    p.ex_color = 0.35;
+    p.ex_time = 0.3;
+    p.cavity = 0.45;
+    p.cavity_tune = 130.0;
+    p.head2_tune = 7.0;
+    p.head2_damp = 0.75;
+    p.wires = 1.0;
+    p.wire_tune = 1800.0;
+    p.wire_decay = 0.45;
+    p.wire_throw = 1.0;
+    p.root_weight = 0.8;
+    apply_brace_macro(&mut p, 0.15);
+    p
+}
+
+struct BenchResult {
+    ns_per_frame: f64,
+    worst_block_us: f64,
+    checksum: f32,
+}
+
+fn bench_case(p: &EngineParams, voices: usize, sr: f32, seconds: f32) -> BenchResult {
+    const BLOCK: usize = 64;
+    let mut engines: Vec<Engine> = (0..voices).map(|_| Engine::new(sr)).collect();
+    let total_blocks = (seconds * sr) as usize / BLOCK;
+    let retrig_blocks = (sr as usize) / BLOCK; // every ~1 s
+    let stagger = (0.025 * sr) as usize / BLOCK; // 25 ms, in blocks
+    let mut bl = [0.0f32; BLOCK];
+    let mut br = [0.0f32; BLOCK];
+    let mut mix = [0.0f32; BLOCK];
+    let mut checksum = 0.0f32;
+    let mut total_ns = 0u128;
+    let mut worst_ns = 0u128;
+    for b in 0..total_blocks {
+        // deterministic trigger schedule (independent of liveness)
+        for (vi, e) in engines.iter_mut().enumerate() {
+            if b % retrig_blocks == (vi * stagger) % retrig_blocks {
+                e.trigger(p);
+            }
+        }
+        let t0 = std::time::Instant::now();
+        for e in engines.iter_mut() {
+            e.process(&mut bl, &mut br);
+            for i in 0..BLOCK {
+                mix[i] += bl[i] + br[i];
+            }
+        }
+        let dt = t0.elapsed().as_nanos();
+        total_ns += dt;
+        worst_ns = worst_ns.max(dt);
+        checksum += std::hint::black_box(mix.iter().sum::<f32>());
+        mix = [0.0; BLOCK];
+    }
+    BenchResult {
+        ns_per_frame: total_ns as f64 / (total_blocks * BLOCK) as f64,
+        worst_block_us: worst_ns as f64 / 1000.0,
+        checksum,
+    }
+}
+
+fn bench(args: &[String]) {
+    let mut sr = 44100.0f32;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--sr" => {
+                i += 1;
+                sr = args
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| die("--sr needs a value"));
+            }
+            other => die(&format!("bench: unknown flag {other}")),
+        }
+        i += 1;
+    }
+    let budget_us = 64.0 / sr as f64 * 1e6; // one 64-frame block, in µs
+    let p = bench_recipe_v3(0.95);
+
+    // warmup (page-in, branch predictors, clocks)
+    let _ = bench_case(&p, 1, sr, 1.0);
+
+    eprintln!("clg bench — recipe v3, 64-frame blocks @ {sr} Hz");
+    eprintln!("budget per block: {budget_us:.1} µs");
+    eprintln!();
+    eprintln!("{:<22} {:>10} {:>12} {:>14} {:>10}", "case", "ns/frame", "x-realtime", "worst-block µs", "% budget");
+    let report = |name: &str, r: &BenchResult| {
+        let rt = 1e9 / sr as f64 / r.ns_per_frame;
+        eprintln!(
+            "{:<22} {:>10.1} {:>12.1} {:>14.1} {:>9.1}%  (chk {:.2e})",
+            name,
+            r.ns_per_frame,
+            rt,
+            r.worst_block_us,
+            r.worst_block_us / budget_us * 100.0,
+            r.checksum
+        );
+    };
+    for &v in &[1usize, 4, 8] {
+        let r = bench_case(&p, v, sr, 4.0);
+        report(&format!("full x{v}"), &r);
+    }
+    eprintln!();
+    // component ablations (1 voice): what each mechanism costs
+    let mut cases: Vec<(&str, EngineParams)> = Vec::new();
+    let mut q = p;
+    q.wires = 0.0;
+    cases.push(("- wires", q));
+    let mut q = p;
+    q.cavity = 0.0;
+    cases.push(("- cavity", q));
+    let mut q = p;
+    q.dust_level = 0.0;
+    cases.push(("- bed/dust", q));
+    let mut q = p;
+    q.sat_count = 0;
+    q.rattle_level = 0.0;
+    cases.push(("- satellites", q));
+    let mut q = p;
+    q.decohere = 0.0;
+    cases.push(("- decohere", q));
+    let mut q = p;
+    q.exciter = Exciter::Mallet;
+    cases.push(("- stick (mallet)", q));
+    let mut q = p;
+    q.root_weight = 0.0;
+    cases.push(("- root weight", q));
+    let mut q = p;
+    q.cascade_amt = 0.7;
+    q.cascade_coherent = true;
+    q.cascade_conserve = true;
+    cases.push(("+ cascade 0.7", q));
+    let mut q = p;
+    q.n_axial = 12; // 144-mode bank: the dense-transect stress case
+    cases.push(("+ modes 144", q));
+    for (name, cp) in &cases {
+        let r = bench_case(cp, 1, sr, 4.0);
+        report(name, &r);
+    }
 }

@@ -268,15 +268,28 @@ sizes ~24×24..48×48; CFL at the limit.
 - Patch files are TOML mirroring `EngineParams` 1:1 (flags override
   fields). Probes and batches are driven by `tools/render_batch.py`.
 
-## Numbers (targets, to be revised by measurement)
+## Numbers (M12: MEASURED, no longer targets)
 
 - 48 kHz reference; 44.1–192 supported. Block-rate coefficient update
   every 32 samples with interpolation.
-- Budget: 8 voices × (256 modes + 1 mesh 32×32 + 4 satellites) ≤ ~20%
-  of one modern core. First measurement milestone gates the mesh's
-  default-on status.
+- **Measured (M12, M-series, release profile, `clg bench` fixed
+  methodology — recipe v3: 36 modes + cavity/R2 + 16 wires + 2 sats +
+  bed + decohere + Stick):** 1 voice 238 ns/frame (95× realtime);
+  8 voices 1430 ns/frame (16× realtime), worst 64-frame block 11.7 %
+  of budget. Dense-transect stress case (144 modes) 411 ns/frame,
+  55× realtime single-voice. The original ≤20 %-of-core budget is met
+  with 2× margin; the standing gate is `clg bench` `full x8`
+  worst-block < 25 % (CLAUDE.md law).
+- The M12 perf ledger: fused previous-sample taps (seats + batter
+  net-volume ride the modal loop — bit-exact), zero-reaction loop
+  skip, hoisted per-sample constants, stick-chain ring-out skip,
+  choke tail skip, wire contact `pen·√pen`, voice sleep at −90 dB
+  below own output peak with 150 ms hysteresis. Satellite contact
+  keeps exact `powf` (chaotic contact amplifies the ULP difference
+  past the −80 dB null gate). Next lever if ever needed: modal-bank
+  SoA for NEON autovectorization (not taken — 8× headroom stands).
 - Fixed voice memory, preallocated at `new()`; voice stealing by
-  energy floor.
+  energy floor; voices SLEEP (M12) instead of ringing at −154 dB.
 
 ## Prototype lab (`lab/`)
 

@@ -346,6 +346,19 @@ pub struct Engine {
     // dust, right channel (engaged only when width/decohere > 0)
     dust_lp1r: f32,
     dust_lp2r: f32,
+    // M12 perf — previous-sample taps, fused into the modal update loop
+    // (seat displacements + batter net-volume): the modal bank is touched
+    // ONCE per sample instead of once per consumer. Bit-exact: identical
+    // arithmetic in identical k-order, one sample of latency by
+    // construction (the taps always read previous-sample states).
+    seat_acc: [f32; MAX_SATS],   // Σ_k sat_w[j][k]·u — next sample's seats
+    seat_acc_r: [f32; MAX_SATS], // R bank dito (stereo engaged only)
+    x1_acc: f32,                 // Σ_k cpl·u — batter net-volume tap
+    dust_thr_lin: f32,           // 10^(dust_thr_db/20), hoisted from the
+                                 // per-sample dust path (param-constant)
+    stick_ring: u32,             // stick Cheby ring-out countdown: the
+                                 // chain runs this many samples past the
+                                 // pulse, then skips (state ≈ −300 dB)
     // satellites
     n_sats: usize,
     sat_w: [[f32; MAX_MODES]; MAX_SATS], // seat weights per mode
@@ -400,6 +413,8 @@ pub struct Engine {
     // dust
     dust_env: f32,   // one-pole envelope of |y| (legacy path)
     dust_peak: f32,  // running peak of bank |y| (shared normalizer)
+    out_peak: f32,   // M12: running peak of the FINAL output (sleep ref)
+    quiet_run: u32,  // M12: consecutive samples below the sleep floor
     dust_lp1: f32,   // crude bandpass: HP(lp1) then LP(lp2) states
     dust_lp2: f32,
     // M9 wire-bed state (engaged when any bed_* param is non-default;
@@ -634,6 +649,11 @@ impl Engine {
             detuned: false,
             dust_lp1r: 0.0,
             dust_lp2r: 0.0,
+            seat_acc: [0.0; MAX_SATS],
+            seat_acc_r: [0.0; MAX_SATS],
+            x1_acc: 0.0,
+            dust_thr_lin: 0.0,
+            stick_ring: 0,
             n_sats: 0,
             sat_w: [[0.0; MAX_MODES]; MAX_SATS],
             sat_z: [0.0; MAX_SATS],
@@ -675,6 +695,8 @@ impl Engine {
             walk_on: false,
             dust_env: 0.0,
             dust_peak: 0.0,
+            out_peak: 0.0,
+            quiet_run: 0,
             dust_lp1: 0.0,
             dust_lp2: 0.0,
             bed_env: 0.0,
@@ -805,6 +827,9 @@ impl Engine {
         self.wire_v = [0.0; N_WIRES];
         self.wire_z = [0.0; N_WIRES];
         self.wire_vz = [0.0; N_WIRES];
+        self.seat_acc = [0.0; MAX_SATS];
+        self.seat_acc_r = [0.0; MAX_SATS];
+        self.x1_acc = 0.0;
         self.pulse_pos = usize::MAX;
         self.active = false;
     }
@@ -1126,6 +1151,15 @@ impl Engine {
         self.e_norm = 0.0;
         self.ctrl_count = 0;
         self.t = 0.0;
+        // M12 perf — fused-tap accumulators start at silence (mode states
+        // were just zeroed above), and per-sample-loop constants hoist here
+        self.seat_acc = [0.0; MAX_SATS];
+        self.seat_acc_r = [0.0; MAX_SATS];
+        self.x1_acc = 0.0;
+        self.dust_thr_lin = (10.0f32).powf(p.dust_thr_db / 20.0).min(0.999);
+        // stick Cheby ring-out: the 17.6 k chain decays > 60 dB in well
+        // under a millisecond; 3 ms of margin puts the skip at ≈ −300 dB
+        self.stick_ring = (0.003 * self.sr) as u32;
 
         // NL2 satellites: seat weights + analytic seat-displacement estimate
         // (replaces the lab's offline calibration pre-pass; the estimate is
@@ -1245,6 +1279,8 @@ impl Engine {
         }
         self.dust_env = 0.0;
         self.dust_peak = 1e-9;
+        self.out_peak = 0.0;
+        self.quiet_run = 0;
         self.dust_lp1 = 0.0;
         self.dust_lp2 = 0.0;
         self.dust_lp1r = 0.0;
@@ -1564,6 +1600,26 @@ impl Engine {
                             }
                         }
                     }
+                    // M12 perf — the fused seat accumulators were built
+                    // with the PREVIOUS weights; walk just changed them.
+                    // Rebuild from current states so this sample's seats
+                    // see the fresh weights, exactly as the pre-fusion
+                    // code did (ctrl-rate cost only).
+                    for j in 0..self.n_sats {
+                        let mut sd = 0.0f32;
+                        let mut sd_r = 0.0f32;
+                        for k in 0..nm_w {
+                            let m = &self.modes[k];
+                            sd += self.sat_w[j][k] * m.u;
+                            if stereo {
+                                let (ru, rv) =
+                                    if self.detuned { (m.ur, m.vr) } else { (m.u, m.v) };
+                                sd_r += self.sat_w_r[j][k] * (ru * m.ct + rv * m.st);
+                            }
+                        }
+                        self.seat_acc[j] = sd;
+                        self.seat_acc_r[j] = sd_r;
+                    }
                 }
                 self.ctrl_count = CTRL_INTERVAL;
             }
@@ -1725,7 +1781,6 @@ impl Engine {
             // its own contact events ("different satellites floating
             // around"). Mono path (stereo off) = legacy single bank.
             let nm = self.n_modes;
-            let detuned_now = self.detuned;
             let mut sat_react = [0.0f32; MAX_SATS];
             let mut sat_react_r = [0.0f32; MAX_SATS];
             let mut sat_radiate = 0.0f32;
@@ -1734,16 +1789,11 @@ impl Engine {
             let restitution = 0.40 + 0.30 * b_snc; // strictly < 1: energy-honest
             let mut shock = 0.0f32; // contact-ENTRY impulses (rattle->cascade)
             for j in 0..self.n_sats {
-                let mut sd = 0.0f32;
-                let mut sd_r = 0.0f32;
-                for k in 0..nm {
-                    let m = &self.modes[k];
-                    sd += self.sat_w[j][k] * m.u;
-                    if stereo {
-                        let (ru, rv) = if detuned_now { (m.ur, m.vr) } else { (m.u, m.v) };
-                        sd_r += self.sat_w_r[j][k] * (ru * m.ct + rv * m.st);
-                    }
-                }
+                // M12 perf: seats come from the fused accumulators (built
+                // during the PREVIOUS sample's modal pass — same states,
+                // same k-order, same bits as the loop this replaces).
+                let sd = self.seat_acc[j];
+                let sd_r = self.seat_acc_r[j];
                 let om = self.sat_om[j];
                 let rest = self.sat_rest_eff[j];
                 // ---- L bank (M8 dynamics: spring blends out, gravity +
@@ -1754,6 +1804,9 @@ impl Engine {
                 let pen = (sd_n - self.sat_z[j]).clamp(0.0, 2.0);
                 let f_n = if pen > 0.0 {
                     self.contacts += 1;
+                    // (M12 note: pen*sqrt(pen) failed the null gate here —
+                    // satellite contact is chaotic enough that the ULP
+                    // difference snowballs past −80 dB. powf stays.)
                     pen.powf(1.5)
                 } else {
                     0.0
@@ -1853,7 +1906,7 @@ impl Engine {
                     let pen_r = (sd_nr - self.sat_z_r[j]).clamp(0.0, 2.0);
                     let f_nr = if pen_r > 0.0 {
                         self.contacts_r += 1;
-                        pen_r.powf(1.5)
+                        pen_r.powf(1.5) // null gate: see L bank note
                     } else {
                         0.0
                     };
@@ -1951,13 +2004,9 @@ impl Engine {
                 let hd = if self.cav_on {
                     self.r2_x2out
                 } else {
-                    let mut x1 = 0.0f32;
-                    for m in self.modes[..nm].iter() {
-                        if m.cpl > 0.0 {
-                            x1 += m.cpl * m.u;
-                        }
-                    }
-                    x1
+                    // M12 perf: fused batter net-volume tap (previous
+                    // sample, same k-order — bit-exact vs the old loop)
+                    self.x1_acc
                 };
                 self.wire_speak = self.wire_speak.max(hd.abs());
                 let hd_n = hd / self.wire_speak;
@@ -1994,7 +2043,7 @@ impl Engine {
                     // unilateral contact: pen geometrically bounded (the
                     // passivity law — bound the geometry, not the force)
                     let pen = (hd_n - self.wire_z[k]).clamp(0.0, 2.0);
-                    let f_n = if pen > 0.0 { pen.powf(1.5) } else { 0.0 };
+                    let f_n = if pen > 0.0 { pen * pen.sqrt() } else { 0.0 }; // = pen^1.5
                     if pen > 0.0 && !self.wire_incontact[k] {
                         // entry loudness = approach speed (M8 impact law);
                         // normalized by the wire's own throw-speed scale
@@ -2049,12 +2098,7 @@ impl Engine {
             // through the cavity resonators; F_batter = −p, F_R2 = +p —
             // the skew-symmetric exchange (energy moves, none is minted).
             let (cav_p, cav_dx) = if self.cav_on {
-                let mut x1 = 0.0f32;
-                for m in self.modes[..nm].iter() {
-                    if m.cpl > 0.0 {
-                        x1 += m.cpl * m.u;
-                    }
-                }
+                let x1 = self.x1_acc; // M12 perf: fused tap (see above)
                 let mut x2 = 0.0f32;
                 let mut pr = 0.0f32;
                 for q in 0..self.n_r2 {
@@ -2089,8 +2133,19 @@ impl Engine {
                 + 0.35 * p.rattle_casc.clamp(0.0, 1.0);
             let n_sats = self.n_sats;
             let sat_w = &self.sat_w;
+            let sat_w_r = &self.sat_w_r;
             let detuned = self.detuned;
             let cav_ret = self.cav_ret;
+            // M12 perf: contact reactions are zero for most samples (no
+            // contact, or bounce mode) — skip the per-mode inner loops
+            // entirely then (drive -= 0·w is the identity, bit-exact).
+            let react_any = sat_react[..n_sats].iter().any(|&x| x != 0.0);
+            let react_any_r = sat_react_r[..n_sats].iter().any(|&x| x != 0.0);
+            // M12 perf: fused previous-sample taps for NEXT sample
+            let need_x1 = self.wire_on || self.cav_on;
+            let mut acc_seat = [0.0f32; MAX_SATS];
+            let mut acc_seat_r = [0.0f32; MAX_SATS];
+            let mut acc_x1 = 0.0f32;
             // M11: with no cavity the wires sit directly on the batter —
             // their reaction loads it through the same volume weights
             let wire_react_bank = if self.wire_on && !self.cav_on {
@@ -2105,8 +2160,10 @@ impl Engine {
                 let base_drive = m.amp * f_in + m.inj * casc_noise
                     - (cav_ret * cav_p + wire_react_bank) * m.cpl * (1.0 - m.r);
                 let mut drive = base_drive;
-                for j in 0..n_sats {
-                    drive -= sat_react[j] * sat_w[j][k];
+                if react_any {
+                    for j in 0..n_sats {
+                        drive -= sat_react[j] * sat_w[j][k];
+                    }
                 }
                 let u = m.r * (m.u * m.cw - m.v * m.sw) + drive;
                 let v = m.r * (m.u * m.sw + m.v * m.cw);
@@ -2116,8 +2173,10 @@ impl Engine {
                 // and its own satellite-bank reaction), else the shared rotor
                 let (ru, rv) = if detuned {
                     let mut drive_r = base_drive;
-                    for j in 0..n_sats {
-                        drive_r -= sat_react_r[j] * sat_w[j][k];
+                    if react_any_r {
+                        for j in 0..n_sats {
+                            drive_r -= sat_react_r[j] * sat_w[j][k];
+                        }
                     }
                     let ur = m.rr * (m.ur * m.cwr - m.vr * m.swr) + drive_r;
                     let vr = m.rr * (m.ur * m.swr + m.vr * m.cwr);
@@ -2128,9 +2187,22 @@ impl Engine {
                     (u, v)
                 };
                 // width/sub-rotate tap: L = u; R = ru·cosθ + rv·sinθ
-                let mut cl = if m.low { u * dep } else { u };
+                let cl = if m.low { u * dep } else { u };
                 let r_tap = ru * m.ct + rv * m.st;
-                let mut cr = if m.low { r_tap * dep } else { r_tap };
+                let cr = if m.low { r_tap * dep } else { r_tap };
+                // M12 perf — fused previous-sample taps: build next
+                // sample's seat displacements and batter net-volume from
+                // the just-updated states, in the same k-order the old
+                // stand-alone loops used (bit-exact by construction).
+                for j in 0..n_sats {
+                    acc_seat[j] += sat_w[j][k] * u;
+                    if stereo {
+                        acc_seat_r[j] += sat_w_r[j][k] * r_tap;
+                    }
+                }
+                if need_x1 && m.cpl > 0.0 {
+                    acc_x1 += m.cpl * u;
+                }
                 if rings_on && !m.low {
                     let mut u2 = m.r * (m.u2 * m.cw - m.v2 * m.sw);
                     let mut v2 = m.r * (m.u2 * m.sw + m.v2 * m.cw);
@@ -2150,6 +2222,9 @@ impl Engine {
                 yl += cl * m.pgl;
                 yr += cr * m.pgr;
             }
+            self.seat_acc = acc_seat;
+            self.seat_acc_r = acc_seat_r;
+            self.x1_acc = acc_x1;
             // M10 — Stick contact radiation: the band-limited pulse
             // itself joins the output (the tick every real stick makes;
             // the mallet's 3 ms thud has no audible direct term). Runs
@@ -2157,7 +2232,17 @@ impl Engine {
             // cosine is only ~−32 dB at 0.45·sr on its own; the cascade
             // takes the gate to spec. Joins before the peak trackers:
             // the wires HEAR the crack (bed attack sharpens, honestly).
-            if p.exciter == Exciter::Stick && self.stick_dir > 0.0 {
+            if p.exciter == Exciter::Stick
+                && self.stick_dir > 0.0
+                && (self.pulse_pos < self.pulse_len || self.stick_ring > 0)
+            {
+                // M12 perf: the chain rings out ~3 ms past the pulse, then
+                // skips — its state is < −300 dB by then (the 17.6 kHz
+                // corner decays ≫ 60 dB/ms); running it for the whole
+                // voice life was pure heat.
+                if self.pulse_pos >= self.pulse_len {
+                    self.stick_ring -= 1;
+                }
                 let mut d = self.stick_dir * f_in;
                 for (c, st) in self.bed_bqc.iter().zip(self.stick_bq.iter_mut()) {
                     let y = c[0] * d + st[0];
@@ -2303,7 +2388,7 @@ impl Engine {
                     && p.bed_source <= 0.0
                     && p.bed_comb <= 0.0
                     && (p.bed_bright - 0.5).abs() < 1e-6;
-                let thr = (10.0f32).powf(p.dust_thr_db / 20.0).min(0.999);
+                let thr = self.dust_thr_lin; // M12 perf: hoisted to trigger()
                 if legacy_bed {
                     let ay = yl.abs();
                     let a_env = self.a_env;
@@ -2441,8 +2526,11 @@ impl Engine {
             // rings join the output last (kept out of every normalizer path)
             yl += ring_l;
             yr += ring_r;
-            // bracing choke: early clamp that releases (both channels)
-            if p.brace_choke > 0.0 {
+            // bracing choke: early clamp that releases (both channels).
+            // M12 perf: past 0.6 s the choke gain is 1 − 5e-5·choke at
+            // most (double-exp release) — skip the two exps for the tail
+            // (residual < −86 dB relative, far under the null gate).
+            if p.brace_choke > 0.0 && self.t < 0.6 {
                 let ch = (-(self.t) * 14.0 * p.brace_choke * (-self.t / 0.05).exp()).exp();
                 yl *= ch;
                 yr *= ch;
@@ -2452,7 +2540,24 @@ impl Engine {
             peak = peak.max(yl.abs()).max(yr.abs());
             self.t += dt;
         }
-        if peak < 1e-6 && self.pulse_pos >= self.pulse_len && self.t > 0.25 {
+        // M12 perf — voice sleep at −90 dB below the voice's own running
+        // OUTPUT peak, held for 150 ms (hysteresis: dust/contact tails
+        // are BURSTY — the null gate caught a single-block lull cutting
+        // a tail that resumed at −79 dB; and the first attempt referenced
+        // the pre-dust bank peak, which was worse). The old absolute 1e-6
+        // floor was ~−154 dB for a typical hit, so plugin voices burned
+        // full engine cost for seconds of inaudible tail.
+        self.out_peak = self.out_peak.max(peak);
+        let sleep_floor = (self.out_peak * 3.16e-5).max(1e-6);
+        if peak < sleep_floor {
+            self.quiet_run += n as u32;
+        } else {
+            self.quiet_run = 0;
+        }
+        if self.quiet_run as f32 >= 0.15 * self.sr
+            && self.pulse_pos >= self.pulse_len
+            && self.t > 0.25
+        {
             self.active = false;
         }
         self.active

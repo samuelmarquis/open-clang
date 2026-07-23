@@ -392,3 +392,44 @@ wires-on-batter), install 12/12, clap-validator 18/18 non-skipped
 0 warnings ×3, auval SUCCEEDED. (xtask validate's VST3-SDK
 validator task fails environmentally — SMTG cmake XCode detection —
 unrelated to the plugin; CLAP + auval are the QC gates of record.)
+
+## M12 — the performance round (2026-07-23)
+
+**Root cause of the M4 underruns: M9–M11 were installed DEBUG.**
+`cargo xtask install` defaults to the debug profile (`--release` is
+opt-in); the build step used `--release` but the install step
+didn't, so the installed CLAP (9.1 MB, hash-matched to
+`plugins/debug/`) was a 17.6×-slower engine. Measured (`clg bench`,
+recipe v3, 64-frame blocks @44.1k): debug 8-voice = **0.7×
+realtime**, worst block **322 % of budget** (4 voices already
+98.5 %); release 8-voice = 16× realtime, worst block 11.7 %. No
+param changes; no ABI change.
+
+Engine perf ledger (mean ns/frame, before → after, release):
+1 voice 294 → 238; 8 voices 1939 → 1430 (1.36×). Changes: fused
+previous-sample taps (satellite seats + batter net-volume built
+inside the modal pass — bit-exact, same k-order; walk regen
+rebuilds them at ctrl rate), zero-reaction inner-loop skip, dust
+threshold hoisted to trigger, stick Cheby ring-out skip (~3 ms past
+pulse), brace-choke tail skip (t > 0.6 s, < −86 dB residual), wire
+contact `pen·√pen` for `powf`, voice sleep at −90 dB below own
+OUTPUT peak with 150 ms hysteresis (replaces the absolute 1e-6
+floor ≈ −154 dB).
+
+Drift policy: bit-exact where free; else the six-patch null matrix
+(v3/wood/sats/casc/buck/dust ×3 s, `lab/null_ab.py`) vs M11 HEAD at
+≤ −80 dB. Final: −95.1…−107.5 dB, all PASS. The gate caught two
+real bugs (sleep floor referencing the pre-dust bank peak → clipped
+a rattle-carried tail at −79 dB; single-block sleep firing inside a
+bursty-tail lull) and one disallowed optimization (satellite
+`pen·√pen` — chaotic contact amplifies the ULP difference past the
+gate; satellites keep exact `powf`).
+
+QC: tests 6/6, autopsy battery all four targets green on the
+optimized build (ring 19 pk, rise 2.86 ms LF-led, tail 0.44–0.54 s
+flat, dominance 12.5 dB @191), install 12/12 RELEASE with
+**hash-verify installed == release artifact**, clap-validator 18/18
+0 warnings ×3, auval SUCCEEDED. New standing tools: `clg bench`
+(fixed methodology; `full x8` worst-block < 25 % is the ship gate)
+and `tools/qc.zsh` (the only sanctioned install path: fuzz → build
+→ install --release → hash-verify → validate → bench).
