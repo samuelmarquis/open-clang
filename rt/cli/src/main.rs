@@ -12,7 +12,7 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 || args[0] != "render" {
-        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
+        die("usage: clg render OUT.wav [--arch membrane|plate|bar] [--f0 HZ] [--vel 0..1] [--pos 0..1] [--listen-pos 0..1] [--stiff 0..1] [--t60 S] [--tilt X] [--n-axial N] [--glide ST] [--out-tilt DB_PER_OCT] [--casc 0..1] [--casc-tau S] [--casc-split MULT] [--casc-attack 0..1] [--casc-conserve] [--brace 0..1] [--sats wires|loose|trash] [--dust-level 0..1] [--exciter mallet|burst|buckling|raw|stick] [--ex-color 0..1] [--ex-time 0..1] [--decohere 0..1] [--stereo-floor 0..1] [--rattle-level 0..1] [--mode-spread 0..1] [--damp-asym 0..1] [--sub-rotate 0..1] [--rattle-casc 0..1] [--bounce 0..1] [--rattle-gap 0..1] [--gap-vel 0..1] [--rattle-tune ST] [--rattle-track 0..1] [--walk 0..1] [--bed-release 0..1] [--bed-source 0..1] [--bed-comb 0..1] [--bed-bright 0..1] [--cavity 0..1] [--cavity-tune HZ] [--head2-tune ST] [--head2-damp 0..1] [--wires 0..1] [--wire-tune HZ] [--wire-decay S] [--wire-throw 0..1] [--root-weight 0..1] [--size 0.4..2.5] [--vel-curve 0.25..4] [--dur S] [--sr HZ]");
     }
     let out_path = &args[1];
     let mut p = EngineParams::default();
@@ -129,6 +129,12 @@ fn main() {
             "--cavity-tune" => p.cavity_tune = val(),
             "--head2-tune" => p.head2_tune = val(), // semitones vs f0
             "--head2-damp" => p.head2_damp = val(),
+            // M11 — the wire bank (Net1) + Root Weight
+            "--wires" => p.wires = val(),
+            "--wire-tune" => p.wire_tune = val(), // Hz, band center
+            "--wire-decay" => p.wire_decay = val(), // seconds, T60
+            "--wire-throw" => p.wire_throw = val(),
+            "--root-weight" => p.root_weight = val(),
             "--exciter" => {
                 i += 1;
                 p.exciter = match args.get(i).map(|s| s.as_str()) {

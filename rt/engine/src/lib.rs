@@ -17,6 +17,7 @@ pub const CTRL_INTERVAL: usize = 32; // samples between coefficient updates
 pub const R2_MODES: usize = 12; // M10: resonant (snare-side) head bank
 pub const CAV_MODES: usize = 4; // M10: cavity air modes (Helmholtz + pipe)
 pub const BED_BQ: usize = 6; // M10: bed band-limit biquad sections (order 12)
+pub const N_WIRES: usize = 16; // M11: wire-bank resonators (Net1)
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Arch {
@@ -142,6 +143,35 @@ pub struct EngineParams {
     /// 0..1: resonant-head damping (0 = ringing head, 1 = choked/wire-
     /// loaded; the wire-bed rides this head's motion when cavity is on).
     pub head2_damp: f32,
+    // M11 — the wire bank (Net1): wires as ACTUAL resonators in
+    // intermittent contact with the snare-side head. The M10.5 autopsy
+    // convicted the noise bed as a wire mechanism: real snare tails
+    // carry 13–17 DISCRETE tonal peaks (0.4–8 kHz, stable per
+    // instrument, MORE visible at ghost velocity) — statistics cannot
+    // produce stable peaks, resonators can. 0 = off, bit-exact legacy.
+    /// 0..1 — wire-bank level (mix vs bank peak, satellite pattern).
+    pub wires: f32,
+    /// wire-band center, Hz (fixed-per-patch golden-salted placement
+    /// spans ±1.75 octaves around this — the instrument fingerprint).
+    pub wire_tune: f32,
+    /// wire ring T60, seconds (SD-measured dry-snare zone ≈ 0.39–0.63;
+    /// per-wire salted ×0.75–1.25).
+    pub wire_decay: f32,
+    /// 0..1 — throw velocity at impact: wires ejected off the head
+    /// re-land STAGGERED over ~2–4 ms (per-wire return-spring spread)
+    /// — the re-landing contact burst IS the crack (the M10.5 law:
+    /// rise 1.5–2.7 ms, never an impulse; same mechanism as the ring,
+    /// faster timescale).
+    pub wire_throw: f32,
+    // M11 — Root Weight: the fundamental-dominance / un-rimshot axis.
+    // Autopsy F1: real center hits put the strongest peak AT f0 with
+    // partials 7–14 dB down (Halo-Feeder's produced extreme: 25.4 dB);
+    // our modal weighting parked energy on modes 2–4 (−0.1 dB margin =
+    // "reads as rimshot", literally an edge-hit spectrum).
+    /// 0..1 → 0..25 dB attenuation of everything ≥ ~half an octave
+    /// above f0 (mode-weight redistribution at trigger, energy-
+    /// compensated like the transect tilt; no post-EQ). 0 = legacy.
+    pub root_weight: f32,
     // STEREO v1 (M5): per-mode L/R decoherence. Both default 0 = the
     // canonical mono voice, bit-identical in both channels.
     /// 0..1 — per-mode L/R phase divergence (zero below 4·f0: the sub
@@ -231,6 +261,11 @@ impl Default for EngineParams {
             cavity_tune: 170.0,
             head2_tune: 7.0,
             head2_damp: 0.5,
+            wires: 0.0,
+            wire_tune: 1800.0,
+            wire_decay: 0.45,
+            wire_throw: 0.5,
+            root_weight: 0.0,
             decohere: 0.0,
             stereo_floor: 0.3,
             rattle_level: 0.5,
@@ -467,6 +502,38 @@ pub struct Engine {
     // motion) is driven by exciter/cavity/batter only, NEVER by bed
     // output: the normalizer-consumer law holds.
     x2_peak: f32,
+    // M11 — the wire bank (Net1). Each wire: one coupled-form ring
+    // rotor (the tonal peak) + a stiff vertical DOF (tension return
+    // spring, ω_z ~ 2π·150–450 Hz salted → re-landing staggered
+    // 1–3 ms: the crack timing BY MECHANISM) in unilateral contact
+    // with the snare-side head motion (R2 when the cavity is on,
+    // batter net-volume displacement otherwise). Normalized frame
+    // (running peak of head motion) — the satellite lesson: contact
+    // recurs at EVERY velocity, which is why the ring survives ghost
+    // hits (the M10.5 hard constraint).
+    wire_on: bool,
+    wire_u: [f32; N_WIRES],
+    wire_v: [f32; N_WIRES],
+    wire_cw: [f32; N_WIRES],
+    wire_sw: [f32; N_WIRES],
+    wire_r: [f32; N_WIRES],
+    wire_z: [f32; N_WIRES],  // height above the head plane (normalized)
+    wire_vz: [f32; N_WIRES],
+    wire_omz: [f32; N_WIRES], // return-spring ω (tension, salted)
+    wire_rest: [f32; N_WIRES], // per-wire seat gap (small, salted)
+    wire_incontact: [bool; N_WIRES],
+    wire_speak: f32, // running peak of |head motion| (normalizer; its
+                     // input NEVER contains wire output — the law)
+    wire_henv: f32,  // smoothed |hd_n| (~4 ms): contact-feed loudness
+                     // follows the head's REAL envelope — the normalized
+                     // frame keeps contacts RECURRING at every level
+                     // (ghost ring ✓) but must not keep them equally
+                     // LOUD forever (late-entry hiss ✗)
+    wire_hdp: f32,   // previous head displacement (surface velocity)
+    wire_peak: f32,  // running peak of wire radiation (mix normalizer)
+    wire_react: f32, // this-sample reaction force onto the head
+    wire_bq: [[f32; 2]; BED_BQ], // radiation band-limit (own Cheby-II
+                                 // state, shared coefficients)
 }
 
 fn db_to_lin(db: f32) -> f32 {
@@ -676,6 +743,23 @@ impl Engine {
             r2_rad: 0.0,
             r2_x2out: 0.0,
             x2_peak: 1e-9,
+            wire_on: false,
+            wire_u: [0.0; N_WIRES],
+            wire_v: [0.0; N_WIRES],
+            wire_cw: [0.0; N_WIRES],
+            wire_sw: [0.0; N_WIRES],
+            wire_r: [0.0; N_WIRES],
+            wire_z: [0.0; N_WIRES],
+            wire_vz: [0.0; N_WIRES],
+            wire_omz: [0.0; N_WIRES],
+            wire_rest: [0.0; N_WIRES],
+            wire_incontact: [false; N_WIRES],
+            wire_speak: 1e-9,
+            wire_henv: 0.0,
+            wire_hdp: 0.0,
+            wire_peak: 1e-12,
+            wire_react: 0.0,
+            wire_bq: [[0.0; 2]; BED_BQ],
         }
     }
 
@@ -717,6 +801,10 @@ impl Engine {
         self.cav_v = [0.0; CAV_MODES];
         self.r2_u = [0.0; R2_MODES];
         self.r2_v = [0.0; R2_MODES];
+        self.wire_u = [0.0; N_WIRES];
+        self.wire_v = [0.0; N_WIRES];
+        self.wire_z = [0.0; N_WIRES];
+        self.wire_vz = [0.0; N_WIRES];
         self.pulse_pos = usize::MAX;
         self.active = false;
     }
@@ -810,6 +898,32 @@ impl Engine {
             for m in self.modes[..self.n_modes].iter_mut() {
                 e_before += m.amp * m.amp;
                 m.amp *= (m.freq / fmin).powf(p.out_tilt_db_oct / 6.02);
+                e_after += m.amp * m.amp;
+            }
+            if e_after > 0.0 {
+                let comp = (e_before / e_after).sqrt();
+                for m in self.modes[..self.n_modes].iter_mut() {
+                    m.amp *= comp;
+                }
+            }
+        }
+        // M11 — Root Weight: fundamental-dominance redistribution (the
+        // un-rimshot axis; autopsy F1). Attenuation ramps from 0 at the
+        // lowest mode to the full −25·rw dB by HALF an octave above it
+        // (a membrane's mode 2 sits at 1.58·f0 → it takes the full
+        // margin), flat beyond. Physically: strike/listen focus moving
+        // toward dead center, extended past the physical range into the
+        // Halo-Feeder produced extreme (25.4 dB measured). Same
+        // unity-energy compensation as the transect tilt; 0 = legacy
+        // bit-exact.
+        if p.root_weight > 0.0 {
+            let atten_db = 25.0 * p.root_weight.clamp(0.0, 1.0);
+            let mut e_before = 0.0f32;
+            let mut e_after = 0.0f32;
+            for m in self.modes[..self.n_modes].iter_mut() {
+                e_before += m.amp * m.amp;
+                let s = (2.0 * (m.freq / fmin).max(1.0).log2()).min(1.0);
+                m.amp *= (10.0f32).powf(-atten_db * s / 20.0);
                 e_after += m.amp * m.amp;
             }
             if e_after > 0.0 {
@@ -1138,10 +1252,16 @@ impl Engine {
         // M9 wire-bed: param-dependent coefficients + state reset
         {
             let sr = self.sr;
-            // M10 remap: 30 ms → 0.35 s log — the full knob now spans
-            // what was the bottom 40% (Sam, M9 verdict: "couldn't see
-            // myself pushing this past about 40%"). Pre-1.0 break.
-            let rel_t = 0.030 * (11.667f32).powf(p.bed_release.clamp(0.0, 1.0));
+            // M11 recalibration (the M10.5 diagnosis): the knob was in
+            // exponential time-constant units τ, but the ear hears
+            // T60 ≈ 6.91·τ/follow — the M10 remap fixed the SPAN, not
+            // the UNITS. Now the knob IS perceived T60: log-mapped
+            // 0.15–1.5 s, with dust_follow folded into the coefficient
+            // so the knob means the same seconds at any follow setting.
+            // (SD-measured dry-snare zone 0.39–0.63 s = mid-throw;
+            // inversion/gated-reverb at the top, where it belongs.)
+            let t60_knob = 0.15 * (10.0f32).powf(p.bed_release.clamp(0.0, 1.0));
+            let rel_t = t60_knob * p.dust_follow.clamp(0.5, 3.0) / 6.9078;
             self.bed_a_rel = (-1.0 / (rel_t * sr)).exp();
             // brightness: 0.5 = the exact legacy band (bit-identity)
             let b = p.bed_bright.clamp(0.0, 1.0);
@@ -1262,6 +1382,57 @@ impl Engine {
             self.r2_rad = 4000.0;
             self.r2_x2out = 0.0;
             self.x2_peak = 1e-9;
+        }
+        // M11 — wire-bank arming (Net1). Fixed-per-patch placement: the
+        // SD data shows every real snare carries a stable per-instrument
+        // mode fingerprint (Aluminum 743/1184, Coliseum 592/937 Hz, in
+        // every hit) — so wire frequencies are a deterministic golden-
+        // salted spread, ±1.75 octaves around Wire Tune, identical on
+        // every trigger of a patch. wires = 0 → fully off, bit-exact.
+        self.wire_on = p.wires > 0.0;
+        if self.wire_on {
+            let sr = self.sr;
+            let fc = p.wire_tune.clamp(300.0, 6000.0);
+            let dec = p.wire_decay.clamp(0.05, 2.0);
+            let throw = p.wire_throw.clamp(0.0, 1.0);
+            for k in 0..N_WIRES {
+                let s1 = ((k as f32 + 1.0) * PHI) % 1.0;
+                let s2 = ((k as f32 + 1.0) * PHI * 7.0) % 1.0;
+                let s3 = ((k as f32 + 1.0) * PHI * 13.0) % 1.0;
+                let s4 = ((k as f32 + 1.0) * PHI * 29.0) % 1.0;
+                let f = (fc * (2.0f32).powf(3.5 * (s1 - 0.5)))
+                    .clamp(250.0, (8000.0f32).min(0.40 * sr));
+                let w = 2.0 * core::f32::consts::PI * f / sr;
+                self.wire_cw[k] = w.cos();
+                self.wire_sw[k] = w.sin();
+                // per-wire decay salt ×0.75–1.25 around Wire Decay —
+                // the SD target band is a FLAT tail (0.39–0.63 s)
+                let t60k = dec * (0.75 + 0.5 * s2);
+                self.wire_r[k] = (-6.9078 / (t60k * sr)).exp();
+                // tension return spring, 150–450 Hz salted: a thrown
+                // wire re-lands in ~1.1–3.3 ms — the crack's 2–4 ms
+                // stagger BY MECHANISM (M10.5 target ②: never an
+                // impulse). ω·dt ≤ 0.065 ≪ 2: symplectic-stable.
+                self.wire_omz[k] = 2.0 * core::f32::consts::PI * (150.0 + 300.0 * s3);
+                self.wire_rest[k] = 0.03 + 0.03 * s1;
+                self.wire_z[k] = self.wire_rest[k];
+                // THE THROW: ejected at note-on ∝ velocity × Wire
+                // Throw; the return spring brings each wire home at
+                // its own time. Ghost hits barely throw — their ring
+                // comes from recurring gentle contact instead (the
+                // ghost-must-buzz constraint).
+                self.wire_vz[k] =
+                    throw * p.velocity * self.wire_omz[k] * 0.9 * (0.5 + s4);
+                self.wire_u[k] = 0.0;
+                self.wire_v[k] = 0.0;
+                self.wire_incontact[k] = false;
+            }
+            self.wire_speak = 1e-9;
+            self.wire_henv = 0.0;
+            self.wire_hdp = 0.0;
+            self.wire_peak = 1e-12;
+            self.wire_react = 0.0;
+            self.wire_bq = [[0.0; 2]; BED_BQ];
         }
         self.active = true;
     }
@@ -1766,6 +1937,111 @@ impl Engine {
                 0.0
             };
 
+            // M11 — the wire bank (Net1): 16 wires in unilateral contact
+            // with the snare-side head, from PREVIOUS-sample motion (the
+            // satellite convention). Head source: R2 listen tap when the
+            // cavity is on, batter net-volume displacement otherwise —
+            // wires work without the cavity. NORMALIZED frame (running
+            // peak of head motion): contact recurs at every velocity,
+            // which is why the ring survives ghost hits (M10.5 target ①).
+            let mut wire_ring = 0.0f32; // rotor radiation: the tonal peaks
+            let mut wire_snap = 0.0f32; // entry pulses: the crack
+            self.wire_react = 0.0;
+            if self.wire_on {
+                let hd = if self.cav_on {
+                    self.r2_x2out
+                } else {
+                    let mut x1 = 0.0f32;
+                    for m in self.modes[..nm].iter() {
+                        if m.cpl > 0.0 {
+                            x1 += m.cpl * m.u;
+                        }
+                    }
+                    x1
+                };
+                self.wire_speak = self.wire_speak.max(hd.abs());
+                let hd_n = hd / self.wire_speak;
+                let hdv = ((hd_n - self.wire_hdp) / dt).clamp(-4000.0, 4000.0);
+                self.wire_hdp = hd_n;
+                // contact-feed loudness follows the head's REAL envelope
+                // (~4 ms smoother of |hd_n|, which decays with the body
+                // since wire_speak is a frozen max): recurring late
+                // contacts stay QUIET — the wire tail is then owned by
+                // the wire T60 salt (target ③), while ghost hits keep
+                // their full ring (env ≈ 1 near their own onset).
+                self.wire_henv =
+                    self.a_env * self.wire_henv + (1.0 - self.a_env) * hd_n.abs();
+                // squared: radiated click energy rides impact KINETIC
+                // energy — the contact-noise floor dies at twice the
+                // body's dB rate (real drums: 8–14 k T60 ≈ 0.43 s under
+                // an LF body ringing ~0.8 s; displacement-proportional
+                // feed measured 0.77 s — the energy law lands it)
+                let feed = (self.wire_henv * self.wire_henv).min(1.0);
+                // during the strike itself the head CARRIES the wires
+                // (the vibrating-table law): they ride the surface with
+                // the armed throw velocity and generate no entry events —
+                // separation begins when the force pulse ends, so the
+                // first impacts are RE-LANDINGS at 1–3 ms (the crack's
+                // measured rise), not the head's first surge at t≈0.
+                let striking = self.pulse_pos < self.pulse_len && self.t < 0.004;
+                let mut react = 0.0f32;
+                for k in 0..N_WIRES {
+                    if striking {
+                        self.wire_z[k] = hd_n.max(self.wire_rest[k]);
+                        self.wire_incontact[k] = true;
+                        continue;
+                    }
+                    // unilateral contact: pen geometrically bounded (the
+                    // passivity law — bound the geometry, not the force)
+                    let pen = (hd_n - self.wire_z[k]).clamp(0.0, 2.0);
+                    let f_n = if pen > 0.0 { pen.powf(1.5) } else { 0.0 };
+                    if pen > 0.0 && !self.wire_incontact[k] {
+                        // entry loudness = approach speed (M8 impact law);
+                        // normalized by the wire's own throw-speed scale
+                        let rel = (self.wire_vz[k] - hdv).abs();
+                        let hit = (f_n
+                            + 0.5 * (rel / (0.9 * self.wire_omz[k])).min(3.0))
+                            * feed;
+                        self.wire_u[k] += hit; // ring the wire
+                        wire_snap += hit; // the crack pulse
+                    }
+                    self.wire_incontact[k] = pen > 0.0;
+                    // pressed scrape keeps the ring fed through the decay
+                    if pen > 0.0 {
+                        self.wire_u[k] += 0.06 * f_n * feed;
+                    }
+                    // stiff tension return spring + unilateral reaction
+                    let omz = self.wire_omz[k];
+                    let acc = -omz * omz * (self.wire_z[k] - self.wire_rest[k])
+                        - 0.5 * omz * self.wire_vz[k]
+                        + 0.05 * omz * omz * f_n;
+                    self.wire_vz[k] += dt * acc;
+                    self.wire_z[k] += dt * self.wire_vz[k];
+                    if !(self.wire_z[k].is_finite() && self.wire_vz[k].is_finite())
+                    {
+                        self.wire_z[k] = self.wire_rest[k];
+                        self.wire_vz[k] = 0.0;
+                    }
+                    react += f_n;
+                    // wire ring rotor (coupled-form, per-wire T60 salt)
+                    let u = self.wire_r[k]
+                        * (self.wire_u[k] * self.wire_cw[k]
+                            - self.wire_v[k] * self.wire_sw[k]);
+                    let v = self.wire_r[k]
+                        * (self.wire_u[k] * self.wire_sw[k]
+                            + self.wire_v[k] * self.wire_cw[k]);
+                    self.wire_u[k] = u;
+                    self.wire_v[k] = v;
+                    wire_ring += u;
+                }
+                // reaction onto the head, rescaled ONLINE from the
+                // normalized frame to head units by wire_speak (the
+                // M3.2 unit lesson) — applied ×(1−r) at the receiver
+                // (the M10 dissipation law). Bounded: ≤ 0.012·16·2.8 ≈
+                // 0.5× head scale worst-case, typical ~0.03.
+                self.wire_react = 0.012 * react * self.wire_speak;
+            }
+
             // M10 — cavity taps, from PREVIOUS-sample states (same
             // convention as the satellite seats): x1 = batter net-volume
             // displacement, x2 = resonant-head dito, cav_p = cavity
@@ -1815,12 +2091,19 @@ impl Engine {
             let sat_w = &self.sat_w;
             let detuned = self.detuned;
             let cav_ret = self.cav_ret;
+            // M11: with no cavity the wires sit directly on the batter —
+            // their reaction loads it through the same volume weights
+            let wire_react_bank = if self.wire_on && !self.cav_on {
+                self.wire_react
+            } else {
+                0.0
+            };
             for (k, m) in self.modes[..nm].iter_mut().enumerate() {
                 // M10: cavity pressure reacts on the batter (−p, the
                 // heavy-head side of the skew-symmetric pair), ×(1−r):
                 // the receiver-dissipation normalization (see trigger)
                 let base_drive = m.amp * f_in + m.inj * casc_noise
-                    - cav_ret * cav_p * m.cpl * (1.0 - m.r);
+                    - (cav_ret * cav_p + wire_react_bank) * m.cpl * (1.0 - m.r);
                 let mut drive = base_drive;
                 for j in 0..n_sats {
                     drive -= sat_react[j] * sat_w[j][k];
@@ -1904,7 +2187,9 @@ impl Engine {
                     self.cav_u[j] = u;
                     self.cav_v[j] = v;
                 }
-                let f2 = self.cav_k2 * cav_p;
+                // M11: the wires press back on the snare-side head
+                // (unilateral reaction, dissipation-normalized)
+                let f2 = self.cav_k2 * cav_p - self.wire_react;
                 let mut x2o = 0.0f32;
                 for q in 0..self.n_r2 {
                     let u = self.r2_r[q]
@@ -1978,6 +2263,32 @@ impl Engine {
                         yl += rad;
                         yr += rad;
                     }
+                }
+            }
+
+            // M11 — wire radiation: ring + crack through their own
+            // Cheby-II gate (band-limit doctrine), normalized online
+            // against their own running peak, mixed vs the bank peak
+            // (the satellite pattern — dust_peak was tracked BEFORE
+            // this join, so no normalizer contains its consumer). The
+            // bed source taps yl AFTER this: the follower hears the
+            // wires (physical — the noise floor breathes with them).
+            // Single bank, radiated equally L/R (the bed's per-channel
+            // noise supplies the stereo texture above it).
+            if self.wire_on {
+                let mut wr = wire_ring + 2.4 * wire_snap;
+                for (c, st) in self.bed_bqc.iter().zip(self.wire_bq.iter_mut()) {
+                    let y = c[0] * wr + st[0];
+                    st[0] = c[1] * wr - c[3] * y + st[1];
+                    st[1] = c[2] * wr - c[4] * y;
+                    wr = y;
+                }
+                self.wire_peak = self.wire_peak.max(wr.abs());
+                if self.wire_peak > 1e-9 {
+                    let wrad =
+                        wr / self.wire_peak * self.dust_peak * p.wires * 0.9;
+                    yl += wrad;
+                    yr += wrad;
                 }
             }
 

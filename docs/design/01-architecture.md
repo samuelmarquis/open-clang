@@ -345,9 +345,27 @@ becomes canonical. First batches:
   Bed Bright 1.0 now reaches 15.6 kHz. (4) Bed Release remapped
   30 ms–0.35 s. Also: the CLI's 1.5 ms render fade-in was found to
   have erased sub-ms attacks since batch 001 — removed.
-- **M11 (queued)** — Net1 rattling interconnections (satellite
-  chains; the bar-rescue vehicle) — deferred from M10 (the round was
-  full); plus whatever the M10 snare verdict demands.
+- **M11** — the wire round (BUILT 2026-07-24; scope set by the M10.5
+  autopsy, `docs/research/06-snare-measured.md`, whose LOCKED targets
+  were the round's ACCEPTANCE GATE — renders passed the battery
+  before Sam heard them, a first): (1) **wire bank (Net1)** — 16
+  wires as actual coupled-form resonators (fixed-per-patch
+  golden-salted placement ±1.75 oct around Wire Tune; the measured
+  per-instrument fingerprint), each in unilateral contact with the
+  snare-side head (R2; batter net-volume when cavity off), stiff
+  tension return springs (150–450 Hz salted); (2) **the crack = the
+  throw** — wires carried during the strike (vibrating-table law),
+  ejected ∝ velocity·Wire Throw, re-landing STAGGERED over 1–3 ms:
+  crack and ring are one mechanism at two timescales; contact feed
+  scaled by the head's real envelope SQUARED (click energy rides
+  impact kinetic energy — displacement-proportional feed measured a
+  0.77 s hiss tail, the energy law lands 0.45); (3) **Root Weight**
+  — fundamental-dominance redistribution (0→25 dB crush of
+  everything ≥½ oct above f0, energy-compensated; the un-rimshot
+  axis); (4) Bed Release recalibrated to perceived-T60 seconds
+  (0.15–1.5 s log, follow folded in). Params 48–52. Net1
+  *bar-rescue* (satellite chains between satellites) remains
+  unbuilt — M12+ if the bar still matters.
 - **M-panel** — DEFERRED (2026-07-22): the panel waits on Sam's
   separate design-system effort (shared visual language for the
   sister plugins); re-enters the roadmap on his call. Interaction

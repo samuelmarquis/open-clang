@@ -363,3 +363,32 @@ Validation: fuzz 5/5 (auto-covers 44–47 + the 5-way exciter), new
 gate `cavity_reaches_engine_and_decays` (audibility + no-limit-cycle
 at frequency coincidence), install 12/12, clap-validator 18/18
 non-skipped 0 warnings ×3, auval SUCCEEDED.
+
+## M11 — the wire round (2026-07-24)
+
+Params 48–52 (one batched drop, Sam-approved): Wires, Wire Tune
+(Hz, 800–4000), Wire Decay (s, 0.15–1.2), Wire Throw, Root Weight.
+Table dense 0–52. ONE pre-1.0 breaking change in the same drop: Bed
+Release (id 40) recalibrated from exponential-τ units to
+perceived-T60 seconds, 0.15–1.5 s log, with Dust Follow folded into
+the coefficient (`rel_t = T60·follow/6.908`) — the M10.5 diagnosis:
+the ear hears 6.91·τ/follow, the old knob lied by ~7–10×.
+
+Regression: defaults + legacy-dust patch bit-exact vs `dfee9f9`
+HEAD. The M10 v2 recipe render changes BY DESIGN (its bed_release
+0.6 now means 0.6 s perceived instead of 131 ms τ ≈ 1.4 s audible).
+
+New engine state: 16-wire bank (rotor + vertical contact DOF each),
+own Cheby-II radiation gate. Acceptance was the AUTOPSY BATTERY
+(lab/m11_battery.py vs research 06 LOCKED targets) — recipe v3 and
+the deep-wood variant pass all four targets; ghost render keeps
+≥19 ring peaks (the hard constraint). Band-limit at the maximal
+corner (wire-tune 4000, throw 1, bright 1, comb 1): **−73.7 dB
+(44.1k) / −74.2 dB (48k)** above 0.45·sr.
+
+Validation: tests 6/6 (fuzz auto-covers 48–52; new gate
+`wires_reach_engine_and_decay`, both topologies: wires-on-R2 and
+wires-on-batter), install 12/12, clap-validator 18/18 non-skipped
+0 warnings ×3, auval SUCCEEDED. (xtask validate's VST3-SDK
+validator task fails environmentally — SMTG cmake XCode detection —
+unrelated to the plugin; CLAP + auval are the QC gates of record.)

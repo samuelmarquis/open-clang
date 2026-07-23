@@ -67,6 +67,16 @@ pub(crate) const PARAM_CAVITY_ID: u32 = 44;
 pub(crate) const PARAM_CAVITY_TUNE_ID: u32 = 45;
 pub(crate) const PARAM_HEAD2_TUNE_ID: u32 = 46;
 pub(crate) const PARAM_HEAD2_DAMP_ID: u32 = 47;
+// M11 — the wire bank (Net1) + Root Weight (one batched drop,
+// 2026-07-24, Sam-approved 5 ids). Also in this drop, pre-1.0 breaking
+// change: Bed Release recalibrated from time-constant units to
+// perceived-T60 seconds (0.15–1.5 s log; the M10.5 diagnosis — the ear
+// hears 6.91·τ/follow, so the knob was lying by ~7–10×).
+pub(crate) const PARAM_WIRES_ID: u32 = 48;
+pub(crate) const PARAM_WIRE_TUNE_ID: u32 = 49;
+pub(crate) const PARAM_WIRE_DECAY_ID: u32 = 50;
+pub(crate) const PARAM_WIRE_THROW_ID: u32 = 51;
+pub(crate) const PARAM_ROOT_WEIGHT_ID: u32 = 52;
 
 /// How a parameter formats/parses its value text.
 #[derive(Debug, Clone, Copy)]
@@ -261,6 +271,17 @@ const PARAM_SPECS: &[ParameterSpec] = &[
     continuous(PARAM_CAVITY_TUNE_ID, "Cavity Tune", 50.0, 800.0, 170.0, Format::Hertz),
     continuous(PARAM_HEAD2_TUNE_ID, "Head2 Tune", -12.0, 12.0, 7.0, Format::Semitones),
     continuous(PARAM_HEAD2_DAMP_ID, "Head2 Damp", 0.0, 1.0, 0.5, Format::Percent),
+    // M11 — the wire bank (Net1): wires as ACTUAL resonators (the
+    // M10.5 autopsy: real snare tails carry 13–17 discrete tonal peaks;
+    // statistics can't make stable peaks, resonators can). Wires 0 =
+    // off, bit-exact. Root Weight = the fundamental-dominance /
+    // un-rimshot axis (0 = legacy weighting, 1 ≈ the Halo-Feeder
+    // produced extreme, 25 dB margin).
+    continuous(PARAM_WIRES_ID, "Wires", 0.0, 1.0, 0.0, Format::Percent),
+    continuous(PARAM_WIRE_TUNE_ID, "Wire Tune", 800.0, 4000.0, 1800.0, Format::Hertz),
+    continuous(PARAM_WIRE_DECAY_ID, "Wire Decay", 0.15, 1.2, 0.45, Format::Seconds),
+    continuous(PARAM_WIRE_THROW_ID, "Wire Throw", 0.0, 1.0, 0.5, Format::Percent),
+    continuous(PARAM_ROOT_WEIGHT_ID, "Root Weight", 0.0, 1.0, 0.0, Format::Percent),
 ];
 
 /// The single source of truth for the parameter-store size. The

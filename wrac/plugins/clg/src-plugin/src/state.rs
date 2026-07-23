@@ -24,6 +24,8 @@ use crate::plugin::{
     PARAM_GAP_VEL_ID, PARAM_RATTLE_TUNE_ID, PARAM_RATTLE_TRACK_ID, PARAM_WALK_ID,
     PARAM_BED_RELEASE_ID, PARAM_BED_SOURCE_ID, PARAM_BED_COMB_ID, PARAM_BED_BRIGHT_ID,
     PARAM_CAVITY_ID, PARAM_CAVITY_TUNE_ID, PARAM_HEAD2_TUNE_ID, PARAM_HEAD2_DAMP_ID,
+    PARAM_WIRES_ID, PARAM_WIRE_TUNE_ID, PARAM_WIRE_DECAY_ID, PARAM_WIRE_THROW_ID,
+    PARAM_ROOT_WEIGHT_ID,
     param_clamp,
     param_default, param_exists,
 };
@@ -203,6 +205,11 @@ impl SharedState {
             cavity_tune: self.v(PARAM_CAVITY_TUNE_ID),
             head2_tune: self.v(PARAM_HEAD2_TUNE_ID),
             head2_damp: self.v(PARAM_HEAD2_DAMP_ID),
+            wires: self.v(PARAM_WIRES_ID),
+            wire_tune: self.v(PARAM_WIRE_TUNE_ID),
+            wire_decay: self.v(PARAM_WIRE_DECAY_ID),
+            wire_throw: self.v(PARAM_WIRE_THROW_ID),
+            root_weight: self.v(PARAM_ROOT_WEIGHT_ID),
             ..EngineParams::default()
         };
         apply_brace_macro(&mut p, self.v(PARAM_BRACE_ID));
@@ -331,6 +338,53 @@ mod tests {
             "cavity limit cycle: head {head} tail {tail}"
         );
         assert!(on.iter().all(|x| x.is_finite()));
+    }
+
+    /// M11 gate: the wire bank must (a) be audible through the host
+    /// path, and (b) DECAY — the wire⇄head contact loop is new coupled
+    /// territory (unilateral reactions rectify into pumps; the M8 law).
+    /// Both topologies: cavity ON (wires on R2) and OFF (wires on the
+    /// batter), ringing head, full throw.
+    #[test]
+    fn wires_reach_engine_and_decay() {
+        let sr = 44100.0f32;
+        let render = |wires: f32, cav: f32| -> Vec<f32> {
+            let s = SharedState::new();
+            s.set_parameter_value(PARAM_WIRES_ID, wires as f64).unwrap();
+            s.set_parameter_value(PARAM_WIRE_THROW_ID, 1.0).unwrap();
+            s.set_parameter_value(PARAM_CAVITY_ID, cav as f64).unwrap();
+            s.set_parameter_value(PARAM_HEAD2_DAMP_ID, 0.0).unwrap();
+            s.set_parameter_value(PARAM_ROOT_WEIGHT_ID, 1.0).unwrap();
+            let p = s.engine_params_for_note(60, 0.95);
+            assert!((p.wires - wires).abs() < 1e-6, "wires lost: {}", p.wires);
+            let mut e = clg_engine::Engine::new(sr);
+            e.trigger(&p);
+            let mut out = vec![0.0f32; (sr * 6.0) as usize];
+            let mut r = [0.0f32; 256];
+            for c in out.chunks_mut(256) {
+                let n = c.len();
+                e.process(c, &mut r[..n]);
+            }
+            out
+        };
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        for cav in [0.0f32, 1.0] {
+            let off = render(0.0, cav);
+            let on = render(1.0, cav);
+            let d: Vec<f32> = on.iter().zip(&off).map(|(a, b)| a - b).collect();
+            assert!(
+                rms(&d) > rms(&off) * 0.01,
+                "wires 1.0 inaudible through the host path (cavity {cav})"
+            );
+            let n5 = (sr * 0.5) as usize;
+            let head = rms(&on[..n5]);
+            let tail = rms(&on[on.len() - n5..]);
+            assert!(
+                tail < head * 0.01,
+                "wire limit cycle (cavity {cav}): head {head} tail {tail}"
+            );
+            assert!(on.iter().all(|x| x.is_finite()));
+        }
     }
 
     #[test]
